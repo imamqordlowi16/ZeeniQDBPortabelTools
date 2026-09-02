@@ -112,6 +112,32 @@ ${logonCommandXml}</Configuration>
             };
         }
         try {
+            // 1. Ensure portable directory has its data directory ready with host connections/settings
+            const portablePath = this.getResolvedPortableDir();
+            const portableDataDir = path_1.default.join(portablePath, 'data');
+            try {
+                if (!fs_1.default.existsSync(portableDataDir)) {
+                    fs_1.default.mkdirSync(portableDataDir, { recursive: true });
+                }
+                const hostDataDir = electron_1.app ? path_1.default.join(electron_1.app.getPath('userData'), 'zeeniq_oracle_data') : path_1.default.join(process.cwd(), '.data');
+                if (fs_1.default.existsSync(hostDataDir)) {
+                    ['connections.json', 'settings.json', 'schedules.json', 'history.json'].forEach((file) => {
+                        const src = path_1.default.join(hostDataDir, file);
+                        const dest = path_1.default.join(portableDataDir, file);
+                        if (fs_1.default.existsSync(src)) {
+                            try {
+                                // If destination doesn't exist or host is newer, copy across
+                                fs_1.default.copyFileSync(src, dest);
+                            }
+                            catch (e) { }
+                        }
+                    });
+                }
+            }
+            catch (e) {
+                console.warn('[SandboxService] Data sync warning:', e);
+            }
+            // 2. Generate WSB XML content
             const xmlContent = this.generateWsbContent(config);
             // Try writing to rootDir, fallback to temp dir
             let wsbPath = path_1.default.join(this.rootDir, 'ZeenIQ-Sandbox.wsb');

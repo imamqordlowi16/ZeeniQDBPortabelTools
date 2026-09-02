@@ -152,6 +152,12 @@ electron_1.ipcMain.handle('oracle:get-table-live-count', async (_, config, schem
 electron_1.ipcMain.handle('oracle:detect-binaries', async (_, customPath) => {
     return datapumpService.detectOracleBinaries(customPath);
 });
+electron_1.ipcMain.handle('oracle:execute-query', async (_, config, sql, maxRows) => {
+    return await oracleService.executeQuery(config, sql, maxRows);
+});
+electron_1.ipcMain.handle('oracle:import-data', async (_, config, options) => {
+    return await oracleService.importDataBatch(config, options);
+});
 // ==================== SCHEMA COMPARE & SYNC HANDLERS ====================
 electron_1.ipcMain.handle('compare:run', async (_, sourceConfig, sourceSchema, targetConfig, targetSchema) => {
     return await oracleService.compareSchemas(sourceConfig, sourceSchema, targetConfig, targetSchema);
@@ -478,4 +484,119 @@ electron_1.ipcMain.handle('update:open-log', async () => {
         return true;
     }
     return false;
+});
+// ==================== SYSTEM TOOLS IPC HANDLERS ====================
+// Registry of all available system tools
+const SYSTEM_TOOLS_REGISTRY = {
+    'aktifkan-relay-sangfor': {
+        label: 'Aktifkan Relay Sangfor → Sandbox',
+        script: 'Aktifkan-Relay-Sangfor-Sandbox.ps1',
+        scriptType: 'ps1',
+        requiresAdmin: true,
+        description: 'Mengaktifkan port forwarding (portproxy) dari host ke dalam Windows Sandbox untuk akses Sangfor DB.',
+        category: 'Sandbox & VPN',
+    },
+    'diagnosa-koneksi-db': {
+        label: 'Diagnosa Koneksi DB',
+        script: 'Diagnosa-Koneksi-DB.ps1',
+        scriptType: 'ps1',
+        requiresAdmin: false,
+        description: 'Mengecek rute jaringan, interface aktif, dan test koneksi TCP ke Database Bank Indonesia (10.161.10.135).',
+        category: 'Diagnostik',
+    },
+    'enable-windows-sandbox': {
+        label: 'Enable Windows Sandbox',
+        script: 'Enable-Windows-Sandbox.bat',
+        scriptType: 'bat',
+        requiresAdmin: true,
+        description: 'Mengaktifkan fitur Windows Sandbox (Containers-DisposableClientVM) + Hyper-V. Mendukung Win10 dan Win11 semua edisi.',
+        category: 'Sandbox & VPN',
+    },
+    'fix-windows-sandbox': {
+        label: 'Fix Black Screen Sandbox',
+        script: 'Fix-Windows-Sandbox.bat',
+        scriptType: 'bat',
+        requiresAdmin: true,
+        description: 'Memperbaiki masalah layar hitam (black screen) saat membuka Windows Sandbox dengan reset registry dan layanan vmcompute.',
+        category: 'Sandbox & VPN',
+    },
+    'kunci-rute-db-bi': {
+        label: 'Kunci Rute DB BI ke Wi-Fi',
+        script: 'Kunci-Rute-DB-BI.ps1',
+        scriptType: 'ps1',
+        requiresAdmin: true,
+        description: 'Memaksa route 10.161.10.135 (DB Bank Indonesia) melewati kartu Wi-Fi. Mencegah Sangfor/Ethernet mencaplok jalur DB.',
+        category: 'Network Routing',
+    },
+    'reset-network-routing': {
+        label: 'Reset Network Routing',
+        script: 'Reset-Network-Routing.ps1',
+        scriptType: 'ps1',
+        requiresAdmin: true,
+        description: 'Mengembalikan semua metric interface dan static route ke kondisi default Windows. Gunakan jika jaringan kacau.',
+        category: 'Network Routing',
+    },
+    'setup-dual-network': {
+        label: 'Setup Dual Network',
+        script: 'Setup-Dual-Network.ps1',
+        scriptType: 'ps1',
+        requiresAdmin: true,
+        description: 'Konfigurasi lengkap dual-network: Internet via Ethernet, DB BI via Wi-Fi, DB Proyek via Sangfor — semuanya harmonis.',
+        category: 'Network Routing',
+    },
+};
+electron_1.ipcMain.handle('tools:list-scripts', async () => {
+    return SYSTEM_TOOLS_REGISTRY;
+});
+electron_1.ipcMain.handle('tools:run-script', async (_, scriptKey) => {
+    const tool = SYSTEM_TOOLS_REGISTRY[scriptKey];
+    if (!tool) {
+        return { success: false, error: `Unknown script key: ${scriptKey}` };
+    }
+    // Resolve script path relative to app root
+    const appRoot = electron_1.app.isPackaged ? path_1.default.dirname(process.execPath) : path_1.default.resolve(__dirname, '..', '..');
+    const scriptPath = path_1.default.join(appRoot, tool.script);
+    if (!fs_1.default.existsSync(scriptPath)) {
+        return { success: false, error: `Script not found: ${scriptPath}` };
+    }
+    const sendToolOutput = (line, streamType) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('tools:output', { scriptKey, line, streamType, timestamp: new Date().toTimeString().split(' ')[0] });
+        }
+    };
+    return new Promise((resolve) => {
+        const { spawn } = require('child_process');
+        let proc;
+        if (tool.scriptType === 'ps1') {
+            proc = spawn('powershell.exe', [
+                '-NoProfile',
+                '-NonInteractive',
+                '-ExecutionPolicy', 'Bypass',
+                '-File', scriptPath,
+            ], { windowsHide: false });
+        }
+        else {
+            // .bat file
+            proc = spawn('cmd.exe', ['/c', scriptPath], { windowsHide: false });
+        }
+        sendToolOutput(`▶ Menjalankan: ${tool.script}`, 'system');
+        proc.stdout?.on('data', (data) => {
+            const lines = data.toString('utf8').split(/\r?\n/);
+            lines.forEach((line) => { if (line.trim())
+                sendToolOutput(line, 'stdout'); });
+        });
+        proc.stderr?.on('data', (data) => {
+            const lines = data.toString('utf8').split(/\r?\n/);
+            lines.forEach((line) => { if (line.trim())
+                sendToolOutput(line, 'stderr'); });
+        });
+        proc.on('close', (code) => {
+            sendToolOutput(`✔ Selesai dengan exit code: ${code ?? 0}`, 'system');
+            resolve({ success: (code ?? 0) === 0 });
+        });
+        proc.on('error', (err) => {
+            sendToolOutput(`✖ Error: ${err.message}`, 'stderr');
+            resolve({ success: false, error: err.message });
+        });
+    });
 });

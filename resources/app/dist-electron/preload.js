@@ -8,6 +8,8 @@ const electronAPI = {
     getSchemaObjects: (config, schemaName) => electron_1.ipcRenderer.invoke('oracle:get-schema-objects', config, schemaName),
     getObjectDDL: (config, schemaName, objectType, objectName) => electron_1.ipcRenderer.invoke('oracle:get-object-ddl', config, schemaName, objectType, objectName),
     getTableLiveRowCount: (config, schemaName, tableName) => electron_1.ipcRenderer.invoke('oracle:get-table-live-count', config, schemaName, tableName),
+    executeQuery: (config, sql, maxRows) => electron_1.ipcRenderer.invoke('oracle:execute-query', config, sql, maxRows),
+    importData: (config, options) => electron_1.ipcRenderer.invoke('oracle:import-data', config, options),
     // Schema Compare & Selective Sync
     compareSchemas: (sourceConfig, sourceSchema, targetConfig, targetSchema) => electron_1.ipcRenderer.invoke('compare:run', sourceConfig, sourceSchema, targetConfig, targetSchema),
     generateMigrationSql: (sourceConfig, sourceSchema, targetConfig, targetSchema, selectedItems, includeData) => electron_1.ipcRenderer.invoke('compare:generate-sql', sourceConfig, sourceSchema, targetConfig, targetSchema, selectedItems, includeData),
@@ -77,6 +79,14 @@ const electronAPI = {
         const listener = (_, log) => callback(log);
         electron_1.ipcRenderer.on('update:log', listener);
         return () => electron_1.ipcRenderer.removeListener('update:log', listener);
+    },
+    // System Tools
+    toolsListScripts: () => electron_1.ipcRenderer.invoke('tools:list-scripts'),
+    toolsRunScript: (scriptKey) => electron_1.ipcRenderer.invoke('tools:run-script', scriptKey),
+    onToolsOutput: (callback) => {
+        const listener = (_, data) => callback(data);
+        electron_1.ipcRenderer.on('tools:output', listener);
+        return () => electron_1.ipcRenderer.removeListener('tools:output', listener);
     },
 };
 electron_1.contextBridge.exposeInMainWorld('electronAPI', electronAPI);

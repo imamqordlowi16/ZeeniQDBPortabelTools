@@ -6,17 +6,22 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.StorageService = void 0;
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
+const os_1 = __importDefault(require("os"));
 const electron_1 = require("electron");
 class StorageService {
     baseDir;
+    portableDataDir = null;
     connectionsFile;
     historyFile;
     schedulesFile;
     settingsFile;
     constructor() {
-        this.baseDir = electron_1.app ? path_1.default.join(electron_1.app.getPath('userData'), 'zeeniq_oracle_data') : path_1.default.join(process.cwd(), '.data');
+        this.baseDir = this.resolveDataDirectory();
         if (!fs_1.default.existsSync(this.baseDir)) {
-            fs_1.default.mkdirSync(this.baseDir, { recursive: true });
+            try {
+                fs_1.default.mkdirSync(this.baseDir, { recursive: true });
+            }
+            catch (e) { }
         }
         this.connectionsFile = path_1.default.join(this.baseDir, 'connections.json');
         this.historyFile = path_1.default.join(this.baseDir, 'history.json');
@@ -24,7 +29,72 @@ class StorageService {
         this.settingsFile = path_1.default.join(this.baseDir, 'settings.json');
         this.initializeDefaults();
     }
+    isRunningInSandbox() {
+        if (process.platform !== 'win32')
+            return false;
+        const username = (process.env.USERNAME || '').toLowerCase();
+        const userInfoName = (os_1.default.userInfo()?.username || '').toLowerCase();
+        return (username === 'wdagutilityaccount' ||
+            userInfoName === 'wdagutilityaccount' ||
+            process.cwd().toLowerCase().includes('wdagutilityaccount') ||
+            (electron_1.app && process.execPath.toLowerCase().includes('wdagutilityaccount')));
+    }
+    resolveDataDirectory() {
+        const isSandbox = this.isRunningInSandbox();
+        // 1. If running inside Windows Sandbox, ALWAYS write to the mapped portable data folder!
+        if (isSandbox) {
+            const execDir = electron_1.app ? path_1.default.dirname(process.execPath) : process.cwd();
+            const mappedDataDir = path_1.default.join(execDir, 'data');
+            try {
+                if (!fs_1.default.existsSync(mappedDataDir)) {
+                    fs_1.default.mkdirSync(mappedDataDir, { recursive: true });
+                }
+                console.log('[StorageService] Running in Windows Sandbox. Persistent mapped data dir:', mappedDataDir);
+                return mappedDataDir;
+            }
+            catch (e) {
+                console.warn('[StorageService] Failed to create sandbox mapped data dir, falling back:', e);
+            }
+        }
+        // 2. Check if running as packaged portable on host
+        if (electron_1.app && electron_1.app.isPackaged) {
+            const exeDir = path_1.default.dirname(process.execPath);
+            const exeDataDir = path_1.default.join(exeDir, 'data');
+            if (fs_1.default.existsSync(exeDataDir)) {
+                this.portableDataDir = exeDataDir;
+                return exeDataDir;
+            }
+        }
+        // 3. Host dev / standard location
+        const appRoot = path_1.default.resolve(__dirname, '..', '..');
+        const repoPortableDataDir = path_1.default.join(appRoot, 'ZeenIQ-Oracle-Tools-Portable', 'data');
+        if (fs_1.default.existsSync(path_1.default.join(appRoot, 'ZeenIQ-Oracle-Tools-Portable'))) {
+            this.portableDataDir = repoPortableDataDir;
+        }
+        const hostDir = electron_1.app ? path_1.default.join(electron_1.app.getPath('userData'), 'zeeniq_oracle_data') : path_1.default.join(process.cwd(), '.data');
+        return hostDir;
+    }
+    syncToPortable(filename, content) {
+        if (this.portableDataDir) {
+            try {
+                if (!fs_1.default.existsSync(this.portableDataDir)) {
+                    fs_1.default.mkdirSync(this.portableDataDir, { recursive: true });
+                }
+                fs_1.default.writeFileSync(path_1.default.join(this.portableDataDir, filename), content, 'utf-8');
+            }
+            catch (e) { }
+        }
+    }
     initializeDefaults() {
+        // If portable data directory exists and has connections, import them if host connections missing
+        if (this.portableDataDir && fs_1.default.existsSync(path_1.default.join(this.portableDataDir, 'connections.json'))) {
+            if (!fs_1.default.existsSync(this.connectionsFile)) {
+                try {
+                    fs_1.default.copyFileSync(path_1.default.join(this.portableDataDir, 'connections.json'), this.connectionsFile);
+                }
+                catch (e) { }
+            }
+        }
         if (!fs_1.default.existsSync(this.connectionsFile)) {
             const defaultConnections = [
                 {
@@ -52,7 +122,9 @@ class StorageService {
                     createdAt: new Date().toISOString(),
                 },
             ];
-            fs_1.default.writeFileSync(this.connectionsFile, JSON.stringify(defaultConnections, null, 2), 'utf-8');
+            const jsonStr = JSON.stringify(defaultConnections, null, 2);
+            fs_1.default.writeFileSync(this.connectionsFile, jsonStr, 'utf-8');
+            this.syncToPortable('connections.json', jsonStr);
         }
         if (!fs_1.default.existsSync(this.historyFile)) {
             fs_1.default.writeFileSync(this.historyFile, JSON.stringify([], null, 2), 'utf-8');
@@ -61,23 +133,33 @@ class StorageService {
             fs_1.default.writeFileSync(this.schedulesFile, JSON.stringify([], null, 2), 'utf-8');
         }
         if (!fs_1.default.existsSync(this.settingsFile)) {
-            const defaultFolder = path_1.default.join(electron_1.app ? electron_1.app.getPath('documents') : process.cwd(), 'OracleBackups');
-            if (!fs_1.default.existsSync(defaultFolder)) {
+            if (this.portableDataDir && fs_1.default.existsSync(path_1.default.join(this.portableDataDir, 'settings.json'))) {
                 try {
-                    fs_1.default.mkdirSync(defaultFolder, { recursive: true });
+                    fs_1.default.copyFileSync(path_1.default.join(this.portableDataDir, 'settings.json'), this.settingsFile);
                 }
                 catch (e) { }
             }
-            const defaultSettings = {
-                defaultBackupFolder: defaultFolder,
-                autoCompressZip: true,
-                maxParallelThreads: 4,
-                theme: 'dark',
-                updateShareRoot: 'C:\\ZeenIQTools\\ZeeniQDbToolsShare\\ZeeniQDbTools.git',
-                sourceGitRemote: '',
-                autoCheckUpdate: true,
-            };
-            fs_1.default.writeFileSync(this.settingsFile, JSON.stringify(defaultSettings, null, 2), 'utf-8');
+            if (!fs_1.default.existsSync(this.settingsFile)) {
+                const defaultFolder = path_1.default.join(electron_1.app ? electron_1.app.getPath('documents') : process.cwd(), 'OracleBackups');
+                if (!fs_1.default.existsSync(defaultFolder)) {
+                    try {
+                        fs_1.default.mkdirSync(defaultFolder, { recursive: true });
+                    }
+                    catch (e) { }
+                }
+                const defaultSettings = {
+                    defaultBackupFolder: defaultFolder,
+                    autoCompressZip: true,
+                    maxParallelThreads: 4,
+                    theme: 'dark',
+                    updateShareRoot: 'C:\\ZeenIQTools\\ZeeniQDbToolsShare\\ZeeniQDbTools.git',
+                    sourceGitRemote: '',
+                    autoCheckUpdate: true,
+                };
+                const jsonStr = JSON.stringify(defaultSettings, null, 2);
+                fs_1.default.writeFileSync(this.settingsFile, jsonStr, 'utf-8');
+                this.syncToPortable('settings.json', jsonStr);
+            }
         }
     }
     // Connections
@@ -102,13 +184,17 @@ class StorageService {
         else {
             list.unshift(conn);
         }
-        fs_1.default.writeFileSync(this.connectionsFile, JSON.stringify(list, null, 2), 'utf-8');
+        const jsonStr = JSON.stringify(list, null, 2);
+        fs_1.default.writeFileSync(this.connectionsFile, jsonStr, 'utf-8');
+        this.syncToPortable('connections.json', jsonStr);
         return conn;
     }
     deleteConnection(id) {
         const list = this.getConnections();
         const filtered = list.filter((c) => c.id !== id);
-        fs_1.default.writeFileSync(this.connectionsFile, JSON.stringify(filtered, null, 2), 'utf-8');
+        const jsonStr = JSON.stringify(filtered, null, 2);
+        fs_1.default.writeFileSync(this.connectionsFile, jsonStr, 'utf-8');
+        this.syncToPortable('connections.json', jsonStr);
         return true;
     }
     getConnectionById(id) {
@@ -133,16 +219,22 @@ class StorageService {
         if (list.length > 500) {
             list.length = 500;
         }
-        fs_1.default.writeFileSync(this.historyFile, JSON.stringify(list, null, 2), 'utf-8');
+        const jsonStr = JSON.stringify(list, null, 2);
+        fs_1.default.writeFileSync(this.historyFile, jsonStr, 'utf-8');
+        this.syncToPortable('history.json', jsonStr);
     }
     deleteHistoryItem(id) {
         const list = this.getHistory();
         const filtered = list.filter((h) => h.id !== id);
-        fs_1.default.writeFileSync(this.historyFile, JSON.stringify(filtered, null, 2), 'utf-8');
+        const jsonStr = JSON.stringify(filtered, null, 2);
+        fs_1.default.writeFileSync(this.historyFile, jsonStr, 'utf-8');
+        this.syncToPortable('history.json', jsonStr);
         return true;
     }
     clearHistory() {
-        fs_1.default.writeFileSync(this.historyFile, JSON.stringify([], null, 2), 'utf-8');
+        const jsonStr = JSON.stringify([], null, 2);
+        fs_1.default.writeFileSync(this.historyFile, jsonStr, 'utf-8');
+        this.syncToPortable('history.json', jsonStr);
     }
     // Schedules
     getSchedules() {
@@ -166,13 +258,17 @@ class StorageService {
         else {
             list.push(schedule);
         }
-        fs_1.default.writeFileSync(this.schedulesFile, JSON.stringify(list, null, 2), 'utf-8');
+        const jsonStr = JSON.stringify(list, null, 2);
+        fs_1.default.writeFileSync(this.schedulesFile, jsonStr, 'utf-8');
+        this.syncToPortable('schedules.json', jsonStr);
         return schedule;
     }
     deleteSchedule(id) {
         const list = this.getSchedules();
         const filtered = list.filter((s) => s.id !== id);
-        fs_1.default.writeFileSync(this.schedulesFile, JSON.stringify(filtered, null, 2), 'utf-8');
+        const jsonStr = JSON.stringify(filtered, null, 2);
+        fs_1.default.writeFileSync(this.schedulesFile, jsonStr, 'utf-8');
+        this.syncToPortable('schedules.json', jsonStr);
         return true;
     }
     // Settings
@@ -200,7 +296,9 @@ class StorageService {
     saveSettings(settings) {
         const current = this.getSettings();
         const updated = { ...current, ...settings };
-        fs_1.default.writeFileSync(this.settingsFile, JSON.stringify(updated, null, 2), 'utf-8');
+        const jsonStr = JSON.stringify(updated, null, 2);
+        fs_1.default.writeFileSync(this.settingsFile, jsonStr, 'utf-8');
+        this.syncToPortable('settings.json', jsonStr);
         return updated;
     }
 }

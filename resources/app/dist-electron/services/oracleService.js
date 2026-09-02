@@ -1546,5 +1546,123 @@ class OracleService {
         const buffer = await sqlFile.buffer();
         return buffer.toString('utf-8');
     }
+    // ==================== QUERY & DATA WORKBENCH ====================
+    async executeQuery(config, sql, maxRows = 1000) {
+        const startTime = Date.now();
+        let conn = null;
+        try {
+            conn = await this.createConnection(config);
+            const cleanSql = sql.trim().replace(/;+$/, '');
+            const isSelect = /^\s*(SELECT|WITH)\s+/i.test(cleanSql);
+            if (isSelect) {
+                const result = await conn.execute(cleanSql, [], {
+                    maxRows: maxRows,
+                    outFormat: oracledb_1.default.OUT_FORMAT_ARRAY,
+                });
+                const columns = (result.metaData || []).map((m) => m.name);
+                const rows = (result.rows || []).map((row) => row.map((val) => {
+                    if (val === null || val === undefined)
+                        return null;
+                    if (val instanceof Date)
+                        return val.toISOString();
+                    if (Buffer.isBuffer(val))
+                        return `[BLOB ${val.length} bytes]`;
+                    return String(val);
+                }));
+                const executionTimeMs = Date.now() - startTime;
+                return {
+                    success: true,
+                    columns,
+                    rows,
+                    rowCount: rows.length,
+                    executionTimeMs,
+                };
+            }
+            else {
+                const result = await conn.execute(cleanSql, [], { autoCommit: true });
+                const executionTimeMs = Date.now() - startTime;
+                return {
+                    success: true,
+                    columns: [],
+                    rows: [],
+                    rowCount: 0,
+                    affectedRows: result.rowsAffected ?? 0,
+                    executionTimeMs,
+                };
+            }
+        }
+        catch (err) {
+            return {
+                success: false,
+                columns: [],
+                rows: [],
+                rowCount: 0,
+                executionTimeMs: Date.now() - startTime,
+                error: err?.message || String(err),
+            };
+        }
+        finally {
+            if (conn) {
+                try {
+                    await conn.close();
+                }
+                catch (e) { }
+            }
+        }
+    }
+    async importDataBatch(config, options) {
+        let conn = null;
+        try {
+            conn = await this.createConnection(config);
+            const schema = options.schema || config.schema || config.user;
+            const targetTable = schema ? `"${schema.toUpperCase()}"."${options.table.toUpperCase()}"` : `"${options.table.toUpperCase()}"`;
+            if (options.mode === 'truncate') {
+                try {
+                    await conn.execute(`TRUNCATE TABLE ${targetTable}`);
+                }
+                catch (e) {
+                    await conn.execute(`DELETE FROM ${targetTable}`);
+                    await conn.commit();
+                }
+            }
+            if (!options.rows || options.rows.length === 0) {
+                return { success: true, insertedCount: 0 };
+            }
+            const colList = options.columns.map((c) => `"${c.toUpperCase()}"`).join(', ');
+            const bindList = options.columns.map((_, i) => `:${i + 1}`).join(', ');
+            const insertSql = `INSERT INTO ${targetTable} (${colList}) VALUES (${bindList})`;
+            const batchSize = options.batchSize || 100;
+            let inserted = 0;
+            for (let i = 0; i < options.rows.length; i += batchSize) {
+                const chunk = options.rows.slice(i, i + batchSize);
+                const formattedChunk = chunk.map((r) => r.map((val) => {
+                    if (val === undefined || val === null || val === '')
+                        return null;
+                    return val;
+                }));
+                await conn.executeMany(insertSql, formattedChunk, { autoCommit: false });
+                inserted += chunk.length;
+            }
+            await conn.commit();
+            return { success: true, insertedCount: inserted };
+        }
+        catch (err) {
+            if (conn) {
+                try {
+                    await conn.rollback();
+                }
+                catch (e) { }
+            }
+            return { success: false, insertedCount: 0, error: err?.message || String(err) };
+        }
+        finally {
+            if (conn) {
+                try {
+                    await conn.close();
+                }
+                catch (e) { }
+            }
+        }
+    }
 }
 exports.OracleService = OracleService;
