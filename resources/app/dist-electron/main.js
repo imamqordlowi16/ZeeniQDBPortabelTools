@@ -548,7 +548,44 @@ const SYSTEM_TOOLS_REGISTRY = {
 electron_1.ipcMain.handle('tools:list-scripts', async () => {
     return SYSTEM_TOOLS_REGISTRY;
 });
-electron_1.ipcMain.handle('tools:run-script', async (_, scriptKey) => {
+electron_1.ipcMain.handle('tools:run-script', async (_, scriptKey, customParams, customCommand) => {
+    const sendToolOutput = (line, streamType) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('tools:output', { scriptKey, line, streamType, timestamp: new Date().toTimeString().split(' ')[0] });
+        }
+    };
+    // 1. Custom PowerShell Execution
+    if (scriptKey === 'custom' && customCommand && customCommand.trim()) {
+        return new Promise((resolve) => {
+            const { spawn } = require('child_process');
+            sendToolOutput(`▶ Menjalankan Perintah Kustom:\n  ${customCommand}`, 'system');
+            const proc = spawn('powershell.exe', [
+                '-NoProfile',
+                '-NonInteractive',
+                '-ExecutionPolicy', 'Bypass',
+                '-Command', customCommand,
+            ], { windowsHide: false });
+            proc.stdout?.on('data', (data) => {
+                const lines = data.toString('utf8').split(/\r?\n/);
+                lines.forEach((line) => { if (line.trim())
+                    sendToolOutput(line, 'stdout'); });
+            });
+            proc.stderr?.on('data', (data) => {
+                const lines = data.toString('utf8').split(/\r?\n/);
+                lines.forEach((line) => { if (line.trim())
+                    sendToolOutput(line, 'stderr'); });
+            });
+            proc.on('close', (code) => {
+                sendToolOutput(`✔ Perintah selesai dengan exit code: ${code ?? 0}`, 'system');
+                resolve({ success: (code ?? 0) === 0 });
+            });
+            proc.on('error', (err) => {
+                sendToolOutput(`✖ Error: ${err.message}`, 'stderr');
+                resolve({ success: false, error: err.message });
+            });
+        });
+    }
+    // 2. Predefined Tool Execution with Optional Parameter Injection
     const tool = SYSTEM_TOOLS_REGISTRY[scriptKey];
     if (!tool) {
         return { success: false, error: `Unknown script key: ${scriptKey}` };
@@ -559,27 +596,33 @@ electron_1.ipcMain.handle('tools:run-script', async (_, scriptKey) => {
     if (!fs_1.default.existsSync(scriptPath)) {
         return { success: false, error: `Script not found: ${scriptPath}` };
     }
-    const sendToolOutput = (line, streamType) => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('tools:output', { scriptKey, line, streamType, timestamp: new Date().toTimeString().split(' ')[0] });
-        }
-    };
     return new Promise((resolve) => {
         const { spawn } = require('child_process');
         let proc;
         if (tool.scriptType === 'ps1') {
-            proc = spawn('powershell.exe', [
+            const psArgs = [
                 '-NoProfile',
                 '-NonInteractive',
                 '-ExecutionPolicy', 'Bypass',
-                '-File', scriptPath,
-            ], { windowsHide: false });
+            ];
+            if (customParams && Object.keys(customParams).length > 0) {
+                // Build PowerShell execution wrapper with injected parameter variables
+                const paramAssignments = Object.entries(customParams)
+                    .map(([k, v]) => `$${k} = "${String(v ?? '').replace(/"/g, '`"')}";`)
+                    .join(' ');
+                const wrappedCommand = `${paramAssignments} & '${scriptPath.replace(/'/g, "''")}'`;
+                psArgs.push('-Command', wrappedCommand);
+            }
+            else {
+                psArgs.push('-File', scriptPath);
+            }
+            proc = spawn('powershell.exe', psArgs, { windowsHide: false });
         }
         else {
             // .bat file
             proc = spawn('cmd.exe', ['/c', scriptPath], { windowsHide: false });
         }
-        sendToolOutput(`▶ Menjalankan: ${tool.script}`, 'system');
+        sendToolOutput(`▶ Menjalankan: ${tool.script}${customParams ? ` (Parameter: ${JSON.stringify(customParams)})` : ''}`, 'system');
         proc.stdout?.on('data', (data) => {
             const lines = data.toString('utf8').split(/\r?\n/);
             lines.forEach((line) => { if (line.trim())

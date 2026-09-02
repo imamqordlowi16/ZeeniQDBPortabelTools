@@ -82,7 +82,7 @@ const electronAPI = {
     },
     // System Tools
     toolsListScripts: () => electron_1.ipcRenderer.invoke('tools:list-scripts'),
-    toolsRunScript: (scriptKey) => electron_1.ipcRenderer.invoke('tools:run-script', scriptKey),
+    toolsRunScript: (scriptKey, customParams, customCommand) => electron_1.ipcRenderer.invoke('tools:run-script', scriptKey, customParams, customCommand),
     onToolsOutput: (callback) => {
         const listener = (_, data) => callback(data);
         electron_1.ipcRenderer.on('tools:output', listener);
