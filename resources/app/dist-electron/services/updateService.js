@@ -17,6 +17,11 @@ class UpdateService {
         if (electron_1.app && electron_1.app.isPackaged) {
             return path_1.default.dirname(process.execPath);
         }
+        // In development mode, check if the standalone portable folder exists
+        const devPortableDir = path_1.default.join(process.cwd(), 'ZeenIQ-Oracle-Tools-Portable');
+        if (fs_1.default.existsSync(path_1.default.join(devPortableDir, '.git'))) {
+            return devPortableDir;
+        }
         return process.cwd();
     }
     static getSourceRoot() {
@@ -64,7 +69,7 @@ class UpdateService {
             }
         }
         catch (e) { }
-        // Fetch dari remote
+        // Fetch langsung dari remote git repository portable
         const fetchRes = await this.runGit(appFolder, ['fetch', remote, this.BRANCH]);
         if (fetchRes.exitCode !== 0) {
             const sanitizedErr = this.redactRemote(this.firstLine(fetchRes.stderr || fetchRes.stdout), remote);
@@ -75,7 +80,7 @@ class UpdateService {
                 error: `git fetch gagal: ${sanitizedErr}`,
             };
         }
-        // Hitung jumlah commit yang tertinggal
+        // Hitung jumlah commit yang tertinggal terhadap remote git portable
         const countRes = await this.runGit(appFolder, ['rev-list', '--count', 'HEAD..FETCH_HEAD']);
         if (countRes.exitCode !== 0) {
             return {
@@ -86,12 +91,27 @@ class UpdateService {
             };
         }
         const commitsBehind = parseInt(countRes.stdout.trim(), 10) || 0;
-        // Baca version.txt dari FETCH_HEAD jika memungkinkan
+        // Baca version.txt / resources/app/version.txt dari FETCH_HEAD remote Git
         let remoteVersion;
         try {
             const showRes = await this.runGit(appFolder, ['show', 'FETCH_HEAD:version.txt']);
             if (showRes.exitCode === 0 && showRes.stdout.trim()) {
                 remoteVersion = showRes.stdout.trim();
+            }
+            else {
+                const showAppRes = await this.runGit(appFolder, ['show', 'FETCH_HEAD:resources/app/version.txt']);
+                if (showAppRes.exitCode === 0 && showAppRes.stdout.trim()) {
+                    remoteVersion = showAppRes.stdout.trim();
+                }
+            }
+        }
+        catch (e) { }
+        // Dapatkan log commit baru dari remote Git portable
+        let changelog = [];
+        try {
+            const logRes = await this.runGit(appFolder, ['log', 'HEAD..FETCH_HEAD', '--pretty=format:%h - %s', '-n', '8']);
+            if (logRes.exitCode === 0 && logRes.stdout.trim()) {
+                changelog = logRes.stdout.trim().split('\n').filter(Boolean);
             }
         }
         catch (e) { }
@@ -100,6 +120,7 @@ class UpdateService {
             commitsBehind,
             currentVersion,
             remoteVersion,
+            changelog,
             error: null,
         };
     }
