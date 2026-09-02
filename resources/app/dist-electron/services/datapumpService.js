@@ -7,10 +7,28 @@ exports.DataPumpService = void 0;
 const child_process_1 = require("child_process");
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
+const electron_1 = require("electron");
 class DataPumpService {
     runningProcesses = new Map();
     detectOracleBinaries(customOracleHome) {
         const pathsToCheck = [];
+        // Check inside the portable application folder
+        const appDir = electron_1.app && electron_1.app.isPackaged ? path_1.default.dirname(process.execPath) : process.cwd();
+        const portableClientPaths = [
+            path_1.default.join(appDir, 'instantclient'),
+            path_1.default.join(appDir, 'oracle_client'),
+            path_1.default.join(appDir, 'oracle_client', 'bin'),
+            path_1.default.join(appDir, 'instantclient_tools'),
+            path_1.default.join(appDir, 'bin'),
+            path_1.default.join(appDir, 'tools'),
+            path_1.default.join(process.cwd(), 'instantclient'),
+            path_1.default.join(process.cwd(), 'oracle_client'),
+            path_1.default.join(process.cwd(), 'bin'),
+        ];
+        for (const p of portableClientPaths) {
+            if (fs_1.default.existsSync(p))
+                pathsToCheck.push(p);
+        }
         if (customOracleHome && fs_1.default.existsSync(customOracleHome)) {
             pathsToCheck.push(path_1.default.join(customOracleHome, 'bin'));
             pathsToCheck.push(customOracleHome);
