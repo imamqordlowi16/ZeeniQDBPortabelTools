@@ -8,6 +8,7 @@ const child_process_1 = require("child_process");
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const electron_1 = require("electron");
+const oracledb_1 = __importDefault(require("oracledb"));
 class DataPumpService {
     runningProcesses = new Map();
     detectOracleBinaries(customOracleHome) {
@@ -115,6 +116,7 @@ class DataPumpService {
         const dumpFileName = `${baseName}.dmp`;
         const logFileName = `${baseName}_exp.log`;
         const finalDumpPath = path_1.default.join(outDir, dumpFileName);
+        const finalLogPath = path_1.default.join(outDir, logFileName);
         // Build PARFILE lines
         const parLines = [];
         // Directory
@@ -194,6 +196,14 @@ class DataPumpService {
                     if (line.includes('ORA-') || line.includes('UDE-') || line.includes('KUP-')) {
                         emitLog('error', line);
                     }
+                    else if (line.startsWith('Export:') ||
+                        line.startsWith('Version ') ||
+                        line.startsWith('Copyright ') ||
+                        line.startsWith('Connected to:') ||
+                        line.startsWith('Starting "')) {
+                        // Normal startup banner from expdp CLI
+                        emitLog('info', line);
+                    }
                     else if (line.includes('Total estimation') || line.includes('Processing object type') || line.includes('. . exported')) {
                         emitLog('stdout', line);
                         processedObjects++;
@@ -222,7 +232,7 @@ class DataPumpService {
             };
             child.stdout?.on('data', (d) => handleOutput(d, false));
             child.stderr?.on('data', (d) => handleOutput(d, true));
-            child.on('close', (code) => {
+            child.on('close', async (code) => {
                 this.runningProcesses.delete(options.jobId);
                 const elapsed = Math.floor((Date.now() - startTime) / 1000);
                 // Clean up parfile
@@ -233,13 +243,21 @@ class DataPumpService {
                 catch (e) { }
                 if (code === 0 || code === 5) {
                     // Exit code 0 is success, 5 is completed with warnings in expdp
-                    emitLog('success', `Data Pump export finished with exit code ${code} in ${elapsed}s!`);
+                    emitLog('success', `Data Pump export selesai di server (exit code ${code}) dalam ${elapsed}s!`);
+                    // Otomatis tarik file .dmp dan .log langsung ke laptop pengguna!
+                    emitLog('info', `📥 Mengunduh file dump (.dmp) dari server Oracle ke laptop...`);
+                    const downloadedDmp = await this.downloadFileFromOracleDirectory(config, dirObject, dumpFileName, finalDumpPath, emitLog);
+                    await this.downloadFileFromOracleDirectory(config, dirObject, logFileName, finalLogPath, emitLog);
+                    if (!downloadedDmp) {
+                        emitLog('info', `📌 File dump tetap tersimpan di Server Oracle: [${dirObject}] -> ${dumpFileName}`);
+                        emitLog('info', `💡 Cek path fisik folder di server via SQL: SELECT DIRECTORY_PATH FROM ALL_DIRECTORIES WHERE DIRECTORY_NAME = '${dirObject}';`);
+                    }
                     if (onProgress) {
                         onProgress({
                             jobId: options.jobId,
                             status: 'completed',
                             percentage: 100,
-                            currentStep: 'Export Completed Successfully',
+                            currentStep: downloadedDmp ? 'Export & Download Selesai' : 'Export Completed (Server)',
                             processedObjects,
                             processedRows: totalRows,
                             elapsedSeconds: elapsed,
@@ -441,6 +459,87 @@ class DataPumpService {
                 resolve({ success: false, error: errorMsg });
             });
         });
+    }
+    async downloadFileFromOracleDirectory(config, dirObject, fileName, targetLocalPath, emitLog) {
+        let connection = null;
+        try {
+            const connectTarget = config.serviceName
+                ? `${config.host}:${config.port}/${config.serviceName}`
+                : `${config.host}:${config.port}:${config.sid || 'orcl'}`;
+            connection = await oracledb_1.default.getConnection({
+                user: config.user,
+                password: config.password,
+                connectString: connectTarget,
+                privilege: config.privilege === 'SYSDBA' ? oracledb_1.default.SYSDBA : undefined,
+            });
+            const plsql = `
+        DECLARE
+          l_bfile BFILE;
+          l_len   NUMBER;
+        BEGIN
+          l_bfile := BFILENAME(:dir, :file);
+          IF DBMS_LOB.FILEEXISTS(l_bfile) = 1 THEN
+            DBMS_LOB.FILEOPEN(l_bfile, DBMS_LOB.FILE_READONLY);
+            l_len := DBMS_LOB.GETLENGTH(l_bfile);
+            DBMS_LOB.CREATETEMPORARY(:lob, FALSE);
+            DBMS_LOB.LOADFROMFILE(:lob, l_bfile, l_len);
+            DBMS_LOB.FILECLOSE(l_bfile);
+            :status := 1;
+            :file_size := l_len;
+            :err_msg := 'OK';
+          ELSE
+            :status := 0;
+            :file_size := 0;
+            :err_msg := 'File tidak ditemukan di direktori Oracle ' || :dir;
+          END IF;
+        EXCEPTION
+          WHEN OTHERS THEN
+            :status := -1;
+            :file_size := 0;
+            :err_msg := SQLERRM;
+        END;
+      `;
+            const result = await connection.execute(plsql, {
+                dir: dirObject,
+                file: fileName,
+                status: { dir: oracledb_1.default.BIND_OUT, type: oracledb_1.default.NUMBER },
+                file_size: { dir: oracledb_1.default.BIND_OUT, type: oracledb_1.default.NUMBER },
+                err_msg: { dir: oracledb_1.default.BIND_OUT, type: oracledb_1.default.STRING, maxSize: 1000 },
+                lob: { dir: oracledb_1.default.BIND_OUT, type: oracledb_1.default.BLOB },
+            });
+            if (result.outBinds.status === 1 && result.outBinds.lob) {
+                const lob = result.outBinds.lob;
+                const totalBytes = result.outBinds.file_size || 0;
+                const totalMB = (totalBytes / (1024 * 1024)).toFixed(2);
+                emitLog('info', `Mentransfer ${fileName} (${totalMB} MB) dari server ke laptop...`);
+                const writeStream = fs_1.default.createWriteStream(targetLocalPath);
+                await new Promise((resolve, reject) => {
+                    lob.pipe(writeStream);
+                    writeStream.on('finish', () => resolve());
+                    writeStream.on('error', (err) => reject(err));
+                    lob.on('error', (err) => reject(err));
+                });
+                emitLog('success', `✅ File ${fileName} (${totalMB} MB) berhasil didownload ke laptop: ${targetLocalPath}`);
+                return true;
+            }
+            else {
+                const err = result.outBinds.err_msg || 'Gagal membaca file dari server';
+                emitLog('warning', `⚠️ Info transfer: ${err}. File tetap tersimpan aman di server Oracle.`);
+                return false;
+            }
+        }
+        catch (e) {
+            emitLog('warning', `⚠️ Info transfer: ${e.message}. File dump (.dmp) tetap tersimpan di server database Oracle.`);
+            return false;
+        }
+        finally {
+            if (connection) {
+                try {
+                    await connection.close();
+                }
+                catch (_) { }
+            }
+        }
     }
 }
 exports.DataPumpService = DataPumpService;
