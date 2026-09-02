@@ -1,0 +1,27 @@
+zeeniq_oracle_data/
+Data/
+logs/
+*.log
+temp/
+storage/
+app-runtime.log
+node_modules/
+debug.log
+
+# Binary Electron runtime (terlalu besar untuk GitHub, gunakan Git Share lokal)
+ZeenIQ-Oracle-Tools.exe
+ZeenIQDbTools.Updater.exe
+resources/app/ZeenIQDbTools.Updater.exe
+
+# Chromium/Electron runtime binaries
+*.dll
+*.pak
+*.bin
+*.dat
+icudtl.dat
+LICENSES.chromium.html
+snapshot_blob.bin
+v8_context_snapshot.bin
+vk_swiftshader_icd.json
+version
+locales/

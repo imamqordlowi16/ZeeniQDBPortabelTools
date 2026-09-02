@@ -1,0 +1,16 @@
+{
+  "name": "zeeniq-oracle-backup-tool",
+  "version": "1.0.0",
+  "main": "dist-electron/main.js",
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "clsx": "^2.1.1",
+    "croner": "^9.0.0",
+    "lucide-react": "^1.16.0",
+    "oracledb": "^7.0.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwind-merge": "^3.0.2",
+    "unzipper": "^0.12.3"
+  }
+}
