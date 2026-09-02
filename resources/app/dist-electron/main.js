@@ -403,7 +403,7 @@ electron_1.ipcMain.handle('update:check', async (_, customRemote) => {
     const settings = storageService.getSettings();
     const remote = customRemote ||
         settings.updateShareRoot ||
-        'C:\\ZeenIQTools\\ZeeniQDbToolsShare\\ZeeniQDbTools.git';
+        'https://github.com/imamqordlowi16/ZeeniQDBPortabelTools.git';
     const appFolder = updateService_1.UpdateService.getAppFolder();
     sendUpdateLog('info', `Memeriksa pembaruan dari: ${remote}...`);
     try {
@@ -433,7 +433,7 @@ electron_1.ipcMain.handle('update:apply', async (_, customRemote) => {
     const settings = storageService.getSettings();
     const remote = customRemote ||
         settings.updateShareRoot ||
-        'C:\\ZeenIQTools\\ZeeniQDbToolsShare\\ZeeniQDbTools.git';
+        'https://github.com/imamqordlowi16/ZeeniQDBPortabelTools.git';
     const appFolder = updateService_1.UpdateService.getAppFolder();
     sendUpdateLog('info', `Mempersiapkan proses instalasi update ke ${appFolder}...`);
     updateService_1.UpdateService.launchUpdaterAndExit(remote, appFolder);
@@ -605,17 +605,25 @@ electron_1.ipcMain.handle('tools:run-script', async (_, scriptKey, customParams,
                 '-NonInteractive',
                 '-ExecutionPolicy', 'Bypass',
             ];
+            // Build robust PowerShell execution wrapper using UTF-16LE Base64 EncodedCommand
+            let scriptCode = `$env:ZEENIQ_NONINTERACTIVE = "1"\n`;
             if (customParams && Object.keys(customParams).length > 0) {
-                // Build PowerShell execution wrapper with injected parameter variables
-                const paramAssignments = Object.entries(customParams)
-                    .map(([k, v]) => `$${k} = "${String(v ?? '').replace(/"/g, '`"')}";`)
-                    .join(' ');
-                const wrappedCommand = `${paramAssignments} & '${scriptPath.replace(/'/g, "''")}'`;
-                psArgs.push('-Command', wrappedCommand);
+                for (const [k, v] of Object.entries(customParams)) {
+                    if (typeof v === 'number') {
+                        scriptCode += `$${k} = ${v}\n`;
+                    }
+                    else if (typeof v === 'boolean') {
+                        scriptCode += `$${k} = $${v ? 'true' : 'false'}\n`;
+                    }
+                    else {
+                        const escapedStr = String(v ?? '').replace(/["`$]/g, '`$&');
+                        scriptCode += `$${k} = "${escapedStr}"\n`;
+                    }
+                }
             }
-            else {
-                psArgs.push('-File', scriptPath);
-            }
+            scriptCode += `& "${scriptPath.replace(/["`$]/g, '`$&')}" -NoPause\n`;
+            const encodedCommand = Buffer.from(scriptCode, 'utf16le').toString('base64');
+            psArgs.push('-EncodedCommand', encodedCommand);
             proc = spawn('powershell.exe', psArgs, { windowsHide: false });
         }
         else {

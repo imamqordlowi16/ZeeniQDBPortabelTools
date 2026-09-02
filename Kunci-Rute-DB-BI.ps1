@@ -1,6 +1,12 @@
 # =========================================================================
-# ZeenIQ - Perfect Route Injector for DB 161 (10.161.10.135)
+# ZeenIQ - Perfect Route Injector for DB
 # =========================================================================
+
+param(
+    [string]$TargetIP = "10.161.10.135",
+    [string]$Gateway = "",
+    [switch]$NoPause
+)
 
 # Ensure Administrator privileges
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -13,12 +19,11 @@ if (-not $isAdmin) {
 }
 
 try {
-    $Host.UI.RawUI.WindowTitle = "ZeenIQ - Force Route DB 161 to Wi-Fi Gateway"
+    $Host.UI.RawUI.WindowTitle = "ZeenIQ - Force Route DB to Wi-Fi Gateway"
 } catch {}
-Clear-Host
 
 Write-Host "=========================================================================" -ForegroundColor Green
-Write-Host "   ZeenIQ - FORCE INJECT ROUTE DB 161 KE GATEWAY WI-FI (10.149.0.1)" -ForegroundColor Green
+Write-Host "   ZeenIQ - FORCE INJECT ROUTE DB $TargetIP KE GATEWAY WI-FI" -ForegroundColor Green
 Write-Host "=========================================================================" -ForegroundColor Green
 Write-Host ""
 
@@ -28,84 +33,56 @@ $ErrorActionPreference = "SilentlyContinue"
 $wifiAdapter = Get-NetAdapter | Where-Object { ($_.Name -like "*Wi-Fi*" -or $_.Name -like "*WLAN*" -or $_.InterfaceDescription -like "*Wireless*" -or $_.InterfaceDescription -like "*Wi-Fi*") -and $_.Status -eq "Up" } | Select-Object -First 1
 
 if (-not $wifiAdapter) {
-    Write-Host "[!] Kartu Wi-Fi aktif tidak ditemukan. Pastikan Wi-Fi terhubung ke WLAN-NON-CORP." -ForegroundColor Red
-    Write-Host "Tekan Enter untuk keluar..."
-    Read-Host
-    exit
+    Write-Host "[!] Kartu Wi-Fi aktif tidak ditemukan. Pastikan Wi-Fi terhubung." -ForegroundColor Red
+    if (-not $NoPause -and -not $env:ZEENIQ_NONINTERACTIVE) {
+        Write-Host "Tekan Enter untuk keluar..."
+        try { Read-Host } catch {}
+    }
+    exit 1
 }
 
 $wifiIndex = $wifiAdapter.InterfaceIndex
 $wifiName = $wifiAdapter.Name
 
-# Deteksi Gateway Dinamis Wi-Fi
-$gw = (Get-NetIPConfiguration | Where-Object { $_.InterfaceIndex -eq $wifiIndex -and $_.IPv4DefaultGateway }).IPv4DefaultGateway.NextHop
-if (-not $gw) {
-    $gw = (Get-NetRoute -DestinationPrefix "0.0.0.0/0" -InterfaceIndex $wifiIndex -ErrorAction SilentlyContinue | Select-Object -First 1).NextHop
-}
-if (-not $gw) {
-    $gw = "10.149.192.1"
-}
-
-Write-Host "[1/5] Kartu Wi-Fi Terdeteksi: $wifiName (Index: $wifiIndex)" -ForegroundColor Cyan
-Write-Host "  -> Dynamic Gateway Terdeteksi : $gw" -ForegroundColor Green
-
-# 2. HAPUS TOTAL SEMUA RUTE LAMA / ON-LINK / REGISTRY YANG KADALUARSA
-Write-Host "[2/5] Membersihkan semua rute lama..." -ForegroundColor Cyan
-route delete 10.161.10.135 | Out-Null
-route delete 10.161.0.0 | Out-Null
-route delete 10.161.10.135 0.0.0.0 | Out-Null
-route delete 10.161.0.0 0.0.0.0 | Out-Null
-route delete 10.161.10.135 10.149.0.1 | Out-Null
-route delete 10.161.0.0 10.149.0.1 | Out-Null
-route delete 10.161.10.135 $gw | Out-Null
-route delete 10.161.0.0 $gw | Out-Null
-Remove-NetRoute -DestinationPrefix "10.161.10.135/32" -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-Remove-NetRoute -DestinationPrefix "10.161.0.0/16" -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-
-$regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\PersistentRoutes"
-if (Test-Path $regPath) {
-    Get-ItemProperty -Path $regPath | Get-Member -MemberType NoteProperty | Where-Object { $_.Name -like "10.161*" } | ForEach-Object {
-        Remove-ItemProperty -Path $regPath -Name $_.Name -ErrorAction SilentlyContinue
+# Deteksi Gateway Dinamis Wi-Fi jika tidak diinput manual
+$gw = $Gateway
+if (-not $gw -or -not $gw.Trim()) {
+    $gw = (Get-NetIPConfiguration | Where-Object { $_.InterfaceIndex -eq $wifiIndex -and $_.IPv4DefaultGateway }).IPv4DefaultGateway.NextHop
+    if (-not $gw) {
+        $gw = (Get-NetRoute -DestinationPrefix "0.0.0.0/0" -InterfaceIndex $wifiIndex -ErrorAction SilentlyContinue | Select-Object -First 1).NextHop
+    }
+    if (-not $gw) {
+        $gw = "10.149.192.1"
     }
 }
-Write-Host "  [+] Pembersihan tuntas." -ForegroundColor Green
 
-# 3. SET METRIC WI-FI
-Write-Host "[3/6] Mengatur Metrik Interface $wifiName..." -ForegroundColor Cyan
-Set-NetIPInterface -InterfaceIndex $wifiIndex -InterfaceMetric 35 -ErrorAction SilentlyContinue | Out-Null
-Write-Host "  [+] Metric Interface $wifiName diatur ke 35 (Internet tetap lewat Ethernet/Tethering)." -ForegroundColor Green
+Write-Host "[1/4] Kartu Wi-Fi Terdeteksi: $wifiName (Index: $wifiIndex)" -ForegroundColor Cyan
+Write-Host "  -> Gateway Digunakan : $gw" -ForegroundColor Green
 
-# 4. INJECT RUTE DENGAN NEXTHOP WAJIB GATEWAY AKTIF
-Write-Host "[4/6] Menginjeksi Rute Baru DB BI dengan Gateway Nyata $gw..." -ForegroundColor Cyan
-route add 10.161.10.135 mask 255.255.255.255 $gw metric 1 if $wifiIndex | Out-Null
-route add 10.161.0.0 mask 255.255.0.0 $gw metric 1 if $wifiIndex | Out-Null
-route -p add 10.161.10.135 mask 255.255.255.255 $gw metric 1 if $wifiIndex | Out-Null
-route -p add 10.161.0.0 mask 255.255.0.0 $gw metric 1 if $wifiIndex | Out-Null
-New-NetRoute -InterfaceIndex $wifiIndex -DestinationPrefix "10.161.10.135/32" -NextHop $gw -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null
-New-NetRoute -InterfaceIndex $wifiIndex -DestinationPrefix "10.161.0.0/16" -NextHop $gw -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null
-Write-Host "  [+] Rute presisi 10.161.10.135/32 berhasil disuntikkan ke Gateway $gw." -ForegroundColor Green
-Write-Host "  [+] Rute presisi 10.161.10.135/32 berhasil disuntikkan ke Wi-Fi ($wifiName)." -ForegroundColor Green
+# 2. HAPUS RUTE LAMA
+Write-Host "[2/4] Membersihkan rute lama untuk $TargetIP..." -ForegroundColor Cyan
+route delete $TargetIP | Out-Null
+route delete "$TargetIP" 0.0.0.0 | Out-Null
+route delete "$TargetIP" "$gw" | Out-Null
 
-# 5. TEST KONEKSI TCP PORT 1521
-Write-Host "[5/5] Memverifikasi Jalur dan Test Handshake Oracle Port 1521..." -ForegroundColor Cyan
-$routeCheck = Find-NetRoute -RemoteIPAddress 10.161.10.135 | Select-Object -First 1
-$actualAdapter = Get-NetAdapter -InterfaceIndex $routeCheck.InterfaceIndex -ErrorAction SilentlyContinue
-Write-Host "  -> Rute Terverifikasi : $($actualAdapter.Name) -> NextHop: $($routeCheck.NextHop)" -ForegroundColor Green
+# 3. INJEK RUTE BARU METRIC 1
+Write-Host "[3/4] Menginjeksi rute langsung ke $TargetIP via $gw..." -ForegroundColor Cyan
+route add $TargetIP mask 255.255.255.255 $gw metric 1 if $wifiIndex | Out-Null
 
-$tcp = Test-NetConnection -ComputerName 10.161.10.135 -Port 1521 -InformationLevel Detailed
+# 4. Uji Koneksi TCP
+Write-Host "[4/4] Menguji koneksi TCP ke $TargetIP:1521..." -ForegroundColor Cyan
+$tcp = Test-NetConnection -ComputerName $TargetIP -Port 1521 -InformationLevel Detailed
 if ($tcp.TcpTestSucceeded) {
-    Write-Host ""
-    Write-Host "=========================================================================" -ForegroundColor Green
-    Write-Host "SUKSES BESAR! DB 161 (10.161.10.135:1521) SUDAH TERHUBUNG DAN HIJAU!" -ForegroundColor Green
-    Write-Host "  -> TcpTestSucceeded : TRUE" -ForegroundColor Green
-    Write-Host "=========================================================================" -ForegroundColor Green
-    Write-Host "Sekarang buka ZeenIQ Oracle Tools dan klik Test Connection pada kedua DB!" -ForegroundColor Yellow
+    Write-Host "  [+] SUKSES! Database $TargetIP dapat dijangkau lewat adapter Wi-Fi!" -ForegroundColor Green
 } else {
-    Write-Host ""
-    Write-Host "  -> TcpTestSucceeded : $($tcp.TcpTestSucceeded)" -ForegroundColor Yellow
-    Write-Host "  -> NextHop Aktif    : $($routeCheck.NextHop)" -ForegroundColor Cyan
+    Write-Host "  [!] Rute telah dipasang, namun port 1521 belum merespons." -ForegroundColor Yellow
 }
 
 Write-Host ""
-Write-Host "Tekan tombol ENTER untuk menutup jendela ini..." -ForegroundColor Yellow
-Read-Host
+Write-Host "=========================================================================" -ForegroundColor Green
+Write-Host ""
+
+if (-not $NoPause -and -not $env:ZEENIQ_NONINTERACTIVE) {
+    Write-Host "Tekan tombol ENTER untuk menutup..." -ForegroundColor Yellow
+    try { Read-Host } catch {}
+}

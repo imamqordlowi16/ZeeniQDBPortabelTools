@@ -152,7 +152,7 @@ class StorageService {
                     autoCompressZip: true,
                     maxParallelThreads: 4,
                     theme: 'dark',
-                    updateShareRoot: 'C:\\ZeenIQTools\\ZeeniQDbToolsShare\\ZeeniQDbTools.git',
+                    updateShareRoot: 'https://github.com/imamqordlowi16/ZeeniQTools.git',
                     sourceGitRemote: '',
                     autoCheckUpdate: true,
                 };
@@ -273,25 +273,42 @@ class StorageService {
     }
     // Settings
     getSettings() {
+        const defaultFolder = path_1.default.join(electron_1.app ? electron_1.app.getPath('documents') : process.cwd(), 'OracleBackups');
+        let settings = {
+            defaultBackupFolder: defaultFolder,
+            autoCompressZip: true,
+            maxParallelThreads: 4,
+            theme: 'dark',
+            updateShareRoot: 'https://github.com/imamqordlowi16/ZeeniQDBPortabelTools.git',
+            sourceGitRemote: 'https://github.com/imamqordlowi16/ZeeniQDBPortabelTools.git',
+            autoCheckUpdate: true,
+        };
         try {
             if (fs_1.default.existsSync(this.settingsFile)) {
                 const raw = fs_1.default.readFileSync(this.settingsFile, 'utf-8');
-                return JSON.parse(raw);
+                const parsed = JSON.parse(raw);
+                settings = { ...settings, ...parsed };
             }
         }
         catch (err) {
             console.error('Failed to read settings:', err);
         }
-        const defaultFolder = path_1.default.join(electron_1.app ? electron_1.app.getPath('documents') : process.cwd(), 'OracleBackups');
-        return {
-            defaultBackupFolder: defaultFolder,
-            autoCompressZip: true,
-            maxParallelThreads: 4,
-            theme: 'dark',
-            updateShareRoot: 'C:\\ZeenIQTools\\ZeeniQDbToolsShare\\ZeeniQDbTools.git',
-            sourceGitRemote: '',
-            autoCheckUpdate: true,
-        };
+        // Auto-migrate any old local path or old repo to the online GitHub repository
+        if (!settings.updateShareRoot ||
+            settings.updateShareRoot.includes('ZeeniQDbToolsShare') ||
+            settings.updateShareRoot.includes('C:\\ZeenIQTools') ||
+            settings.updateShareRoot.includes('ZeeniQTools.git') ||
+            !settings.updateShareRoot.startsWith('http')) {
+            settings.updateShareRoot = 'https://github.com/imamqordlowi16/ZeeniQDBPortabelTools.git';
+            settings.sourceGitRemote = 'https://github.com/imamqordlowi16/ZeeniQDBPortabelTools.git';
+            try {
+                const jsonStr = JSON.stringify(settings, null, 2);
+                fs_1.default.writeFileSync(this.settingsFile, jsonStr, 'utf-8');
+                this.syncToPortable('settings.json', jsonStr);
+            }
+            catch (e) { }
+        }
+        return settings;
     }
     saveSettings(settings) {
         const current = this.getSettings();

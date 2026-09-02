@@ -124,7 +124,7 @@ class UpdateService {
             error: null,
         };
     }
-    static DEFAULT_REMOTE_SHARE = 'C:\\ZeenIQTools\\ZeeniQDbToolsShare\\ZeeniQDbTools.git';
+    static DEFAULT_REMOTE_SHARE = 'https://github.com/imamqordlowi16/ZeeniQTools.git';
     static async publishToShare(appFolder, remote, onLog) {
         const validRemote = (remote && remote.trim()) ? remote.trim() : this.DEFAULT_REMOTE_SHARE;
         const gitDir = path_1.default.join(appFolder, '.git');
