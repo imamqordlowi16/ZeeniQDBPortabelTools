@@ -1559,6 +1559,29 @@ class OracleService {
                     maxRows: maxRows,
                     outFormat: oracledb_1.default.OUT_FORMAT_ARRAY,
                 });
+                const columnMeta = (result.metaData || []).map((m) => {
+                    let typeStr = m.dbTypeName || '';
+                    if (!typeStr && m.dbType) {
+                        typeStr = String(m.dbType);
+                    }
+                    if (typeStr === 'VARCHAR2' || typeStr === 'CHAR') {
+                        if (m.byteSize)
+                            typeStr += `(${m.byteSize})`;
+                    }
+                    else if (typeStr === 'NUMBER') {
+                        if (m.precision) {
+                            typeStr += m.scale ? `(${m.precision},${m.scale})` : `(${m.precision})`;
+                        }
+                    }
+                    return {
+                        name: m.name,
+                        dataType: typeStr || 'VARCHAR2',
+                        nullable: m.nullable,
+                        precision: m.precision,
+                        scale: m.scale,
+                        byteSize: m.byteSize,
+                    };
+                });
                 const columns = (result.metaData || []).map((m) => m.name);
                 const rows = (result.rows || []).map((row) => row.map((val) => {
                     if (val === null || val === undefined)
@@ -1573,6 +1596,7 @@ class OracleService {
                 return {
                     success: true,
                     columns,
+                    columnMeta,
                     rows,
                     rowCount: rows.length,
                     executionTimeMs,
