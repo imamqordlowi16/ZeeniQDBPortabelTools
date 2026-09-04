@@ -10,6 +10,7 @@ const electronAPI = {
     getTableLiveRowCount: (config, schemaName, tableName) => electron_1.ipcRenderer.invoke('oracle:get-table-live-count', config, schemaName, tableName),
     executeQuery: (config, sql, maxRows) => electron_1.ipcRenderer.invoke('oracle:execute-query', config, sql, maxRows),
     importData: (config, options) => electron_1.ipcRenderer.invoke('oracle:import-data', config, options),
+    callAiProvider: (params) => electron_1.ipcRenderer.invoke('ai:call-provider', params),
     // Schema Compare & Selective Sync
     compareSchemas: (sourceConfig, sourceSchema, targetConfig, targetSchema) => electron_1.ipcRenderer.invoke('compare:run', sourceConfig, sourceSchema, targetConfig, targetSchema),
     generateMigrationSql: (sourceConfig, sourceSchema, targetConfig, targetSchema, selectedItems, includeData) => electron_1.ipcRenderer.invoke('compare:generate-sql', sourceConfig, sourceSchema, targetConfig, targetSchema, selectedItems, includeData),

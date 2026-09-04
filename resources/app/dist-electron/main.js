@@ -158,6 +158,76 @@ electron_1.ipcMain.handle('oracle:execute-query', async (_, config, sql, maxRows
 electron_1.ipcMain.handle('oracle:import-data', async (_, config, options) => {
     return await oracleService.importDataBatch(config, options);
 });
+// ==================== AI COPILOT HANDLERS ====================
+electron_1.ipcMain.handle('ai:call-provider', async (_, params) => {
+    const startTime = Date.now();
+    const { provider, apiKey, model, systemPrompt, userPrompt } = params;
+    if (!apiKey || !apiKey.trim()) {
+        return { success: false, error: 'API Key belum diisi. Silakan masukkan API Key di Pengaturan AI.' };
+    }
+    try {
+        if (provider === 'gemini') {
+            const selectedModel = model || 'gemini-2.5-flash';
+            const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
+            const res = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    systemInstruction: {
+                        parts: [{ text: systemPrompt }]
+                    },
+                    contents: [
+                        {
+                            parts: [{ text: userPrompt }]
+                        }
+                    ],
+                    generationConfig: {
+                        temperature: 0.2,
+                        maxOutputTokens: 2048,
+                    }
+                })
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                const msg = data.error?.message || `Google Gemini API error (HTTP ${res.status})`;
+                return { success: false, error: msg, latencyMs: Date.now() - startTime };
+            }
+            const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            return { success: true, content: text, latencyMs: Date.now() - startTime };
+        }
+        else if (provider === 'claude') {
+            const selectedModel = model || 'claude-3-7-sonnet-latest';
+            const endpoint = 'https://api.anthropic.com/v1/messages';
+            const res = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'x-api-key': apiKey.trim(),
+                    'anthropic-version': '2023-06-01',
+                    'content-type': 'application/json',
+                },
+                body: JSON.stringify({
+                    model: selectedModel,
+                    max_tokens: 2048,
+                    system: systemPrompt,
+                    messages: [
+                        { role: 'user', content: userPrompt }
+                    ]
+                })
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                const msg = data.error?.message || `Anthropic Claude API error (HTTP ${res.status})`;
+                return { success: false, error: msg, latencyMs: Date.now() - startTime };
+            }
+            const text = data.content?.[0]?.text || '';
+            return { success: true, content: text, latencyMs: Date.now() - startTime };
+        }
+        return { success: false, error: `Provider AI "${provider}" tidak didukung.` };
+    }
+    catch (err) {
+        return { success: false, error: err.message || 'Gagal menghubungi server AI.', latencyMs: Date.now() - startTime };
+    }
+});
 // ==================== SCHEMA COMPARE & SYNC HANDLERS ====================
 electron_1.ipcMain.handle('compare:run', async (_, sourceConfig, sourceSchema, targetConfig, targetSchema) => {
     return await oracleService.compareSchemas(sourceConfig, sourceSchema, targetConfig, targetSchema);
