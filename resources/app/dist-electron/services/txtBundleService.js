@@ -166,7 +166,7 @@ class TxtBundleService {
                 previewRows.push(...fileRows.slice(0, 20 - previewRows.length));
             }
         }
-        // Build suggested table name
+        // Build suggested table name with DATA_ prefix
         let suggestedTable = '';
         if (replyFileName) {
             suggestedTable = replyFileName.replace(/\.(REG|TXT|DAT)$/i, '');
@@ -176,10 +176,13 @@ class TxtBundleService {
         }
         suggestedTable = suggestedTable
             .toUpperCase()
-            .replace(/[^A-Z0-9_]/g, '_')
-            .slice(0, 30);
-        if (!suggestedTable)
-            suggestedTable = 'BBG_DATA_LICENSE';
+            .replace(/[^A-Z0-9_]/g, '_');
+        if (!suggestedTable.startsWith('DATA_')) {
+            suggestedTable = `DATA_${suggestedTable}`;
+        }
+        suggestedTable = suggestedTable.slice(0, 30);
+        if (!suggestedTable || suggestedTable === 'DATA_')
+            suggestedTable = 'DATA_BBG_LICENSE';
         // Construct recommended columns
         const columns = [
             {
@@ -479,10 +482,13 @@ class TxtBundleService {
             .basename(sourceDir || sampleFile)
             .replace(/\.(txt|csv|tsv|reg)$/i, '')
             .toUpperCase()
-            .replace(/[^A-Z0-9_]/g, '_')
-            .slice(0, 30);
-        if (!suggestedTable)
-            suggestedTable = 'CSV_IMPORT_DATA';
+            .replace(/[^A-Z0-9_]/g, '_');
+        if (!suggestedTable.startsWith('DATA_')) {
+            suggestedTable = `DATA_${suggestedTable}`;
+        }
+        suggestedTable = suggestedTable.slice(0, 30);
+        if (!suggestedTable || suggestedTable === 'DATA_')
+            suggestedTable = 'DATA_IMPORT';
         const totalEstimatedRows = filePaths.length * (lines.length - 1);
         return {
             sourcePath: sourceDir,
