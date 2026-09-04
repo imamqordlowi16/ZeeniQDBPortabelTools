@@ -83,6 +83,7 @@ class TxtBundleService {
         const rawSampleLines = [];
         let rowsPerFile = 0;
         let rundateSample = '';
+        let detectedNumFields = 0;
         // Scan the first few files to extract fields and metadata
         const sampleFilesCount = Math.min(filePaths.length, 5);
         for (let i = 0; i < sampleFilesCount; i++) {
@@ -134,7 +135,12 @@ class TxtBundleService {
                     const securityId = parts[0]?.trim() || '';
                     const statusCode = parts[1] ? parseInt(parts[1], 10) : 0;
                     const numFields = parts[2] ? parseInt(parts[2], 10) : 0;
-                    const fieldValues = parts.slice(3, 3 + bbgFields.length);
+                    if (detectedNumFields === 0 && numFields > 0) {
+                        detectedNumFields = numFields;
+                    }
+                    // Jumlah field data dilihat langsung dari Token 2 (parts[2])
+                    const activeFieldCount = numFields > 0 ? numFields : bbgFields.length;
+                    const fieldValues = parts.slice(3, 3 + activeFieldCount);
                     // Format rundate YYYYMMDD -> YYYY-MM-DD
                     let formattedRundate = rundate;
                     if (rundate && rundate.length === 8 && /^\d{8}$/.test(rundate)) {
@@ -147,7 +153,8 @@ class TxtBundleService {
                         STATUS_CODE: statusCode,
                         NUM_FIELDS: numFields,
                     };
-                    bbgFields.forEach((fieldName, fIdx) => {
+                    for (let fIdx = 0; fIdx < activeFieldCount; fIdx++) {
+                        const fieldName = (bbgFields[fIdx] || `FIELD_${fIdx + 1}`).toUpperCase().replace(/[^A-Z0-9_]/g, '_');
                         const rawVal = fieldValues[fIdx]?.trim();
                         if (rawVal !== undefined && rawVal !== '') {
                             const numVal = parseFloat(rawVal);
@@ -156,7 +163,9 @@ class TxtBundleService {
                         else {
                             rowObj[fieldName] = null;
                         }
-                    });
+                        rowObj[`FIELD_${fIdx + 1}`] = rowObj[fieldName];
+                        rowObj[`TOKEN_${3 + fIdx}`] = rowObj[fieldName];
+                    }
                     rowObj.FILE_NAME = fileName;
                     fileRows.push(rowObj);
                 }
@@ -223,22 +232,24 @@ class TxtBundleService {
                 sourceIndex: 1,
                 sourceKey: 'STATUS_CODE',
             },
-            {
-                name: 'NUM_FIELDS',
-                type: 'NUMBER(4)',
-                isNullable: true,
-                sampleValue: bbgFields.length,
-                sourceType: 'token',
-                sourceIndex: 2,
-                sourceKey: 'NUM_FIELDS',
-            },
         ];
-        // Infer column data types for bbgFields
-        bbgFields.forEach((f, fIdx) => {
+        const totalDataFields = detectedNumFields > 0 ? detectedNumFields : (bbgFields.length || 2);
+        columns.push({
+            name: 'NUM_FIELDS',
+            type: 'NUMBER(4)',
+            isNullable: true,
+            sampleValue: totalDataFields,
+            sourceType: 'token',
+            sourceIndex: 2,
+            sourceKey: 'NUM_FIELDS',
+        });
+        // Infer column data types for data fields (Token 3, Token 4, ...) based on Token 2
+        for (let fIdx = 0; fIdx < totalDataFields; fIdx++) {
+            const fName = (bbgFields[fIdx] || `FIELD_${fIdx + 1}`).toUpperCase().replace(/[^A-Z0-9_]/g, '_');
             let isNumeric = true;
             let sampleVal = null;
             for (const row of previewRows) {
-                const val = row[f];
+                const val = row[fName] ?? (bbgFields[fIdx] ? row[bbgFields[fIdx]] : undefined);
                 if (val !== null && val !== undefined) {
                     if (sampleVal === null)
                         sampleVal = val;
@@ -248,15 +259,15 @@ class TxtBundleService {
                 }
             }
             columns.push({
-                name: f.toUpperCase().replace(/[^A-Z0-9_]/g, '_'),
+                name: fName,
                 type: isNumeric ? 'NUMBER(18,6)' : 'VARCHAR2(100)',
                 isNullable: true,
                 sampleValue: sampleVal,
-                sourceType: 'field',
+                sourceType: 'token',
                 sourceIndex: 3 + fIdx,
-                sourceKey: f,
+                sourceKey: fName,
             });
-        });
+        }
         // Add metadata columns
         columns.push({
             name: 'FILE_NAME',
@@ -280,6 +291,16 @@ class TxtBundleService {
         const sampleTokens = [];
         const firstRawLine = rawSampleLines[0] || '';
         const sampleParts = firstRawLine ? firstRawLine.split('|') : [];
+        // Header & Metadata & GUID tokens
+        sampleTokens.unshift({
+            index: -4,
+            label: 'ID (GUID / Primary Key)',
+            sampleValue: previewRows[0]?.ID || crypto_1.default.randomUUID(),
+            suggestedName: 'ID',
+            suggestedType: 'VARCHAR2(36)',
+            sourceType: 'guid',
+            sourceKey: 'ID',
+        });
         // Token 0: Security ID / Ticker
         sampleTokens.push({
             index: 0,
@@ -300,59 +321,32 @@ class TxtBundleService {
             sourceType: 'token',
             sourceKey: 'STATUS_CODE',
         });
-        // Token 2: Num Fields
+        // Token 2: Num Fields (Jumlah Field ditentukan dari sini)
         sampleTokens.push({
             index: 2,
-            label: 'Token 2 (Jumlah Field)',
-            sampleValue: sampleParts[2]?.trim() || String(bbgFields.length),
+            label: `Token 2 (Jumlah Field Data: ${totalDataFields} Field)`,
+            sampleValue: sampleParts[2]?.trim() || String(totalDataFields),
             suggestedName: 'NUM_FIELDS',
             suggestedType: 'NUMBER(4)',
             sourceType: 'token',
             sourceKey: 'NUM_FIELDS',
         });
-        // Tokens for each Bloomberg Field (Token 3, 4, ...)
-        bbgFields.forEach((f, fIdx) => {
+        // Tokens for each Field Data according to Token 2 count (Token 3, 4, ...)
+        for (let fIdx = 0; fIdx < totalDataFields; fIdx++) {
             const tokenIdx = 3 + fIdx;
-            const rawVal = sampleParts[tokenIdx]?.trim() || String(previewRows[0]?.[f] ?? '');
+            const fName = (bbgFields[fIdx] || `FIELD_${fIdx + 1}`).toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+            const rawVal = sampleParts[tokenIdx]?.trim() || String(previewRows[0]?.[fName] ?? '');
             const isNum = rawVal !== '' && !isNaN(parseFloat(rawVal)) && isFinite(Number(rawVal));
             sampleTokens.push({
                 index: tokenIdx,
-                label: `Token ${tokenIdx} (${f})`,
+                label: `Token ${tokenIdx} (Field Data ${fIdx + 1}: ${fName})`,
                 sampleValue: rawVal || '-',
-                suggestedName: f.toUpperCase().replace(/[^A-Z0-9_]/g, '_'),
+                suggestedName: fName,
                 suggestedType: isNum ? 'NUMBER(18,6)' : 'VARCHAR2(100)',
-                sourceType: 'field',
-                sourceKey: f,
+                sourceType: 'token',
+                sourceKey: fName,
             });
-        });
-        // Any remaining tokens in the raw line
-        if (sampleParts.length > 3 + bbgFields.length) {
-            for (let k = 3 + bbgFields.length; k < sampleParts.length; k++) {
-                const extraVal = sampleParts[k]?.trim();
-                if (extraVal) {
-                    const isNum = !isNaN(parseFloat(extraVal)) && isFinite(Number(extraVal));
-                    sampleTokens.push({
-                        index: k,
-                        label: `Token ${k}`,
-                        sampleValue: extraVal,
-                        suggestedName: `FIELD_${k}`,
-                        suggestedType: isNum ? 'NUMBER(18,6)' : 'VARCHAR2(100)',
-                        sourceType: 'token',
-                        sourceKey: `TOKEN_${k}`,
-                    });
-                }
-            }
         }
-        // Header & Metadata & GUID tokens
-        sampleTokens.unshift({
-            index: -4,
-            label: 'ID (GUID / Primary Key)',
-            sampleValue: previewRows[0]?.ID || crypto_1.default.randomUUID(),
-            suggestedName: 'ID',
-            suggestedType: 'VARCHAR2(36)',
-            sourceType: 'guid',
-            sourceKey: 'ID',
-        });
         sampleTokens.push({
             index: -1,
             label: 'Header: RUNDATE (Tanggal File)',
@@ -393,6 +387,7 @@ class TxtBundleService {
             rawSampleLines,
             sampleTokens,
             rundateSample,
+            detectedNumFields: totalDataFields,
         };
     }
     /**
@@ -738,8 +733,9 @@ class TxtBundleService {
                 const parts = line.split('|');
                 const securityId = parts[0]?.trim() || '';
                 const statusCode = parts[1] ? parseInt(parts[1], 10) : 0;
-                const numFields = parts[2] ? parseInt(parts[2], 10) : 0;
-                const fieldValues = parts.slice(3, 3 + fields.length);
+                const numFields = parts[2] ? parseInt(parts[2], 10) : fields.length;
+                const activeFieldCount = numFields > 0 ? numFields : fields.length;
+                const fieldValues = parts.slice(3, 3 + activeFieldCount);
                 let formattedRundate = rundate;
                 if (rundate && rundate.length === 8 && /^\d{8}$/.test(rundate)) {
                     formattedRundate = `${rundate.slice(0, 4)}-${rundate.slice(4, 6)}-${rundate.slice(6, 8)}`;
@@ -751,8 +747,8 @@ class TxtBundleService {
                     NUM_FIELDS: isNaN(numFields) ? 0 : numFields,
                     FILE_NAME: fileName,
                 };
-                fields.forEach((f, idx) => {
-                    const colName = f.toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+                for (let idx = 0; idx < activeFieldCount; idx++) {
+                    const colName = (fields[idx] || `FIELD_${idx + 1}`).toUpperCase().replace(/[^A-Z0-9_]/g, '_');
                     const raw = fieldValues[idx]?.trim();
                     if (raw !== undefined && raw !== '') {
                         const num = parseFloat(raw);
@@ -761,7 +757,9 @@ class TxtBundleService {
                     else {
                         rowMap[colName] = null;
                     }
-                });
+                    rowMap[`FIELD_${idx + 1}`] = rowMap[colName];
+                    rowMap[`TOKEN_${3 + idx}`] = rowMap[colName];
+                }
                 // Map into targetColumns array order
                 const rowArray = targetColumns.map((col) => {
                     if (col.sourceType === 'guid' || col.name === 'ID') {
