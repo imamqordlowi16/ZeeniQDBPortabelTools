@@ -11,6 +11,14 @@ const electronAPI = {
     executeQuery: (config, sql, maxRows) => electron_1.ipcRenderer.invoke('oracle:execute-query', config, sql, maxRows),
     importData: (config, options) => electron_1.ipcRenderer.invoke('oracle:import-data', config, options),
     callAiProvider: (params) => electron_1.ipcRenderer.invoke('ai:call-provider', params),
+    // TXT Bundle & Bloomberg Data License Importer
+    analyzeTxtBundle: (sourcePathOrFiles) => electron_1.ipcRenderer.invoke('txt-bundle:analyze', sourcePathOrFiles),
+    importTxtBundle: (config, options) => electron_1.ipcRenderer.invoke('txt-bundle:import', config, options),
+    onTxtBundleProgress: (callback) => {
+        const listener = (_, progress) => callback(progress);
+        electron_1.ipcRenderer.on('txt-bundle:progress', listener);
+        return () => electron_1.ipcRenderer.removeListener('txt-bundle:progress', listener);
+    },
     // Schema Compare & Selective Sync
     compareSchemas: (sourceConfig, sourceSchema, targetConfig, targetSchema) => electron_1.ipcRenderer.invoke('compare:run', sourceConfig, sourceSchema, targetConfig, targetSchema),
     generateMigrationSql: (sourceConfig, sourceSchema, targetConfig, targetSchema, selectedItems, includeData) => electron_1.ipcRenderer.invoke('compare:generate-sql', sourceConfig, sourceSchema, targetConfig, targetSchema, selectedItems, includeData),
@@ -55,6 +63,7 @@ const electronAPI = {
     // Native Dialogs & Shell
     selectFolder: (title) => electron_1.ipcRenderer.invoke('dialog:select-folder', title),
     selectFile: (title, filters) => electron_1.ipcRenderer.invoke('dialog:select-file', title, filters),
+    selectTxtFiles: (title) => electron_1.ipcRenderer.invoke('dialog:select-txt-files', title),
     openPath: (filePath) => electron_1.ipcRenderer.invoke('shell:open-path', filePath),
     showItemInFolder: (filePath) => electron_1.ipcRenderer.invoke('shell:show-item-in-folder', filePath),
     // Windows Sandbox

@@ -15,6 +15,7 @@ const networkService_1 = require("./services/networkService");
 const appVersionService_1 = require("./services/appVersionService");
 const publishAccessService_1 = require("./services/publishAccessService");
 const updateService_1 = require("./services/updateService");
+const txtBundleService_1 = require("./services/txtBundleService");
 function writeLog(msg) {
     const line = `[${new Date().toISOString()}] ${msg}\n`;
     try {
@@ -42,6 +43,7 @@ let datapumpService;
 let schedulerService;
 let sandboxService;
 let networkService;
+let txtBundleService;
 function initServices() {
     try {
         storageService = new storageService_1.StorageService();
@@ -50,6 +52,7 @@ function initServices() {
         schedulerService = new schedulerService_1.SchedulerService(storageService, oracleService, datapumpService);
         sandboxService = new sandboxService_1.SandboxService();
         networkService = new networkService_1.NetworkService();
+        txtBundleService = new txtBundleService_1.TxtBundleService(oracleService);
         writeLog('Services initialized successfully');
     }
     catch (err) {
@@ -425,6 +428,32 @@ electron_1.ipcMain.handle('dialog:select-file', async (_, title, filters) => {
         return res.filePaths[0];
     }
     return null;
+});
+electron_1.ipcMain.handle('dialog:select-txt-files', async (_, title) => {
+    if (!mainWindow)
+        return [];
+    const res = await electron_1.dialog.showOpenDialog(mainWindow, {
+        title: title || 'Pilih File TXT / Data License',
+        properties: ['openFile', 'multiSelections'],
+        filters: [
+            { name: 'Data Files (*.txt, *.reg, *.csv, *.tsv, *.dat)', extensions: ['txt', 'reg', 'csv', 'tsv', 'dat'] },
+            { name: 'Text Files (*.txt)', extensions: ['txt'] },
+            { name: 'All Files (*.*)', extensions: ['*'] },
+        ],
+    });
+    if (!res.canceled && res.filePaths.length > 0) {
+        return res.filePaths;
+    }
+    return [];
+});
+// ==================== TXT BUNDLE IMPORTER HANDLERS ====================
+electron_1.ipcMain.handle('txt-bundle:analyze', async (_, sourcePathOrFiles) => {
+    return await txtBundleService.analyzeBundle(sourcePathOrFiles);
+});
+electron_1.ipcMain.handle('txt-bundle:import', async (_, config, options) => {
+    return await txtBundleService.executeBundleImport(config, options, (progress) => {
+        mainWindow?.webContents.send('txt-bundle:progress', progress);
+    });
 });
 electron_1.ipcMain.handle('shell:open-path', async (_, targetPath) => {
     return await electron_1.shell.openPath(targetPath);
