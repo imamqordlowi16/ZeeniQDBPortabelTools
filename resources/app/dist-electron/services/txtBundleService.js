@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.TxtBundleService = void 0;
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
+const crypto_1 = __importDefault(require("crypto"));
 class TxtBundleService {
     oracleService;
     constructor(oracleService) {
@@ -140,6 +141,7 @@ class TxtBundleService {
                         formattedRundate = `${rundate.slice(0, 4)}-${rundate.slice(4, 6)}-${rundate.slice(6, 8)}`;
                     }
                     const rowObj = {
+                        ID: crypto_1.default.randomUUID(),
                         RUNDATE: formattedRundate,
                         SECURITY_ID: securityId,
                         STATUS_CODE: statusCode,
@@ -183,8 +185,17 @@ class TxtBundleService {
         suggestedTable = suggestedTable.slice(0, 30);
         if (!suggestedTable || suggestedTable === 'DATA_')
             suggestedTable = 'DATA_BBG_LICENSE';
-        // Construct recommended columns
+        // Construct recommended columns (Diawali kolom ID / GUID default)
         const columns = [
+            {
+                name: 'ID',
+                type: 'VARCHAR2(36)',
+                isNullable: false,
+                sampleValue: previewRows[0]?.ID || crypto_1.default.randomUUID(),
+                sourceType: 'guid',
+                sourceKey: 'ID',
+                isMetadata: true,
+            },
             {
                 name: 'RUNDATE',
                 type: 'VARCHAR2(10)',
@@ -332,7 +343,16 @@ class TxtBundleService {
                 }
             }
         }
-        // Header & Metadata tokens
+        // Header & Metadata & GUID tokens
+        sampleTokens.unshift({
+            index: -4,
+            label: 'ID (GUID / Primary Key)',
+            sampleValue: previewRows[0]?.ID || crypto_1.default.randomUUID(),
+            suggestedName: 'ID',
+            suggestedType: 'VARCHAR2(36)',
+            sourceType: 'guid',
+            sourceKey: 'ID',
+        });
         sampleTokens.push({
             index: -1,
             label: 'Header: RUNDATE (Tanggal File)',
@@ -401,12 +421,24 @@ class TxtBundleService {
             }
         }
         const rawHeaders = headerLine.split(bestDelim).map((h) => h.trim().replace(/^["']|["']$/g, ''));
-        const columns = [];
+        const columns = [
+            {
+                name: 'ID',
+                type: 'VARCHAR2(36)',
+                isNullable: false,
+                sampleValue: crypto_1.default.randomUUID(),
+                sourceType: 'guid',
+                sourceKey: 'ID',
+                isMetadata: true,
+            },
+        ];
         const previewRows = [];
         // Parse up to 20 sample rows
         for (let i = 1; i < Math.min(lines.length, 21); i++) {
             const parts = lines[i].split(bestDelim).map((p) => p.trim().replace(/^["']|["']$/g, ''));
-            const rowObj = {};
+            const rowObj = {
+                ID: crypto_1.default.randomUUID(),
+            };
             rawHeaders.forEach((h, idx) => {
                 const val = parts[idx] ?? '';
                 const numVal = parseFloat(val);
@@ -565,7 +597,14 @@ class TxtBundleService {
                     const nullability = c.isNullable ? '' : ' NOT NULL';
                     const isSysdate = c.name === 'LOAD_TIMESTAMP' ||
                         (c.sourceType === 'metadata' && c.sourceKey === 'LOAD_TIMESTAMP');
-                    const defaultVal = isSysdate ? ' DEFAULT SYSDATE' : '';
+                    const isGuid = c.name === 'ID' ||
+                        c.sourceType === 'guid' ||
+                        c.sourceKey === 'ID';
+                    const defaultVal = isSysdate
+                        ? ' DEFAULT SYSDATE'
+                        : isGuid
+                            ? ' DEFAULT SYS_GUID()'
+                            : '';
                     return `  "${c.name}" ${c.type}${defaultVal}${nullability}`;
                 });
                 const createTableSql = `CREATE TABLE ${fullTableName} (\n${colDefinitions.join(',\n')}\n)`;
@@ -725,6 +764,9 @@ class TxtBundleService {
                 });
                 // Map into targetColumns array order
                 const rowArray = targetColumns.map((col) => {
+                    if (col.sourceType === 'guid' || col.name === 'ID') {
+                        return crypto_1.default.randomUUID();
+                    }
                     let val = null;
                     if (col.sourceType === 'token' && col.sourceIndex !== undefined) {
                         val = parts[col.sourceIndex]?.trim();
@@ -804,6 +846,9 @@ class TxtBundleService {
                 rowMap[h] = !isNaN(numVal) && isFinite(Number(val)) ? numVal : val;
             });
             const rowArray = targetColumns.map((col) => {
+                if (col.sourceType === 'guid' || col.name === 'ID') {
+                    return crypto_1.default.randomUUID();
+                }
                 const val = rowMap[col.name];
                 if (val === undefined || val === null || val === '')
                     return null;
