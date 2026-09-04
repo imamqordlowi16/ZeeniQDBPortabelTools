@@ -79,7 +79,9 @@ class TxtBundleService {
         let replyFileName = '';
         const bbgFields = [];
         const previewRows = [];
+        const rawSampleLines = [];
         let rowsPerFile = 0;
+        let rundateSample = '';
         // Scan the first few files to extract fields and metadata
         const sampleFilesCount = Math.min(filePaths.length, 5);
         for (let i = 0; i < sampleFilesCount; i++) {
@@ -95,6 +97,8 @@ class TxtBundleService {
                     continue;
                 if (line.startsWith('RUNDATE=')) {
                     rundate = line.split('=')[1].trim();
+                    if (!rundateSample)
+                        rundateSample = rundate;
                 }
                 if (line.startsWith('REPLYFILENAME=')) {
                     replyFileName = line.split('=')[1].trim();
@@ -121,6 +125,10 @@ class TxtBundleService {
                     }
                 }
                 else if (section === 'DATA') {
+                    // Strictly lines between START-OF-DATA and END-OF-DATA
+                    if (rawSampleLines.length < 10) {
+                        rawSampleLines.push(line);
+                    }
                     const parts = line.split('|');
                     const securityId = parts[0]?.trim() || '';
                     const statusCode = parts[1] ? parseInt(parts[1], 10) : 0;
@@ -172,7 +180,7 @@ class TxtBundleService {
             .slice(0, 30);
         if (!suggestedTable)
             suggestedTable = 'BBG_DATA_LICENSE';
-        // Construct columns
+        // Construct recommended columns
         const columns = [
             {
                 name: 'RUNDATE',
@@ -254,6 +262,101 @@ class TxtBundleService {
             sourceKey: 'LOAD_TIMESTAMP',
             isMetadata: true,
         });
+        // Build interactive sampleTokens from the real START-OF-DATA row
+        const sampleTokens = [];
+        const firstRawLine = rawSampleLines[0] || '';
+        const sampleParts = firstRawLine ? firstRawLine.split('|') : [];
+        // Token 0: Security ID / Ticker
+        sampleTokens.push({
+            index: 0,
+            label: 'Token 0 (Ticker / Security ID)',
+            sampleValue: sampleParts[0]?.trim() || previewRows[0]?.SECURITY_ID || 'CTIDR1Y Govt',
+            suggestedName: 'SECURITY_ID',
+            suggestedType: 'VARCHAR2(50)',
+            sourceType: 'token',
+            sourceKey: 'SECURITY_ID',
+        });
+        // Token 1: Status Code
+        sampleTokens.push({
+            index: 1,
+            label: 'Token 1 (Status Code)',
+            sampleValue: sampleParts[1]?.trim() || '0',
+            suggestedName: 'STATUS_CODE',
+            suggestedType: 'NUMBER(4)',
+            sourceType: 'token',
+            sourceKey: 'STATUS_CODE',
+        });
+        // Token 2: Num Fields
+        sampleTokens.push({
+            index: 2,
+            label: 'Token 2 (Jumlah Field)',
+            sampleValue: sampleParts[2]?.trim() || String(bbgFields.length),
+            suggestedName: 'NUM_FIELDS',
+            suggestedType: 'NUMBER(4)',
+            sourceType: 'token',
+            sourceKey: 'NUM_FIELDS',
+        });
+        // Tokens for each Bloomberg Field (Token 3, 4, ...)
+        bbgFields.forEach((f, fIdx) => {
+            const tokenIdx = 3 + fIdx;
+            const rawVal = sampleParts[tokenIdx]?.trim() || String(previewRows[0]?.[f] ?? '');
+            const isNum = rawVal !== '' && !isNaN(parseFloat(rawVal)) && isFinite(Number(rawVal));
+            sampleTokens.push({
+                index: tokenIdx,
+                label: `Token ${tokenIdx} (${f})`,
+                sampleValue: rawVal || '-',
+                suggestedName: f.toUpperCase().replace(/[^A-Z0-9_]/g, '_'),
+                suggestedType: isNum ? 'NUMBER(18,6)' : 'VARCHAR2(100)',
+                sourceType: 'field',
+                sourceKey: f,
+            });
+        });
+        // Any remaining tokens in the raw line
+        if (sampleParts.length > 3 + bbgFields.length) {
+            for (let k = 3 + bbgFields.length; k < sampleParts.length; k++) {
+                const extraVal = sampleParts[k]?.trim();
+                if (extraVal) {
+                    const isNum = !isNaN(parseFloat(extraVal)) && isFinite(Number(extraVal));
+                    sampleTokens.push({
+                        index: k,
+                        label: `Token ${k}`,
+                        sampleValue: extraVal,
+                        suggestedName: `FIELD_${k}`,
+                        suggestedType: isNum ? 'NUMBER(18,6)' : 'VARCHAR2(100)',
+                        sourceType: 'token',
+                        sourceKey: `TOKEN_${k}`,
+                    });
+                }
+            }
+        }
+        // Header & Metadata tokens
+        sampleTokens.push({
+            index: -1,
+            label: 'Header: RUNDATE (Tanggal File)',
+            sampleValue: previewRows[0]?.RUNDATE || '2025-12-01',
+            suggestedName: 'RUNDATE',
+            suggestedType: 'VARCHAR2(10)',
+            sourceType: 'header',
+            sourceKey: 'RUNDATE',
+        });
+        sampleTokens.push({
+            index: -2,
+            label: 'Metadata: FILE_NAME (Nama File TXT)',
+            sampleValue: path_1.default.basename(filePaths[0]),
+            suggestedName: 'FILE_NAME',
+            suggestedType: 'VARCHAR2(150)',
+            sourceType: 'metadata',
+            sourceKey: 'FILE_NAME',
+        });
+        sampleTokens.push({
+            index: -3,
+            label: 'Metadata: LOAD_TIMESTAMP (SYSDATE)',
+            sampleValue: 'SYSDATE',
+            suggestedName: 'LOAD_TIMESTAMP',
+            suggestedType: 'DATE',
+            sourceType: 'metadata',
+            sourceKey: 'LOAD_TIMESTAMP',
+        });
         const totalEstimatedRows = filePaths.length * (rowsPerFile || 6);
         return {
             sourcePath: sourceDir,
@@ -264,6 +367,9 @@ class TxtBundleService {
             columns,
             previewRows,
             totalEstimatedRows,
+            rawSampleLines,
+            sampleTokens,
+            rundateSample,
         };
     }
     /**
@@ -341,6 +447,34 @@ class TxtBundleService {
             sampleValue: 'SYSDATE',
             isMetadata: true,
         });
+        // Build sample tokens for delimited file
+        const sampleTokens = rawHeaders.map((h, idx) => ({
+            index: idx,
+            label: `Kolom ${idx + 1} (${h})`,
+            sampleValue: String(previewRows[0]?.[h] ?? ''),
+            suggestedName: h,
+            suggestedType: columns[idx]?.type || 'VARCHAR2(255)',
+            sourceType: 'field',
+            sourceKey: h,
+        }));
+        sampleTokens.push({
+            index: -2,
+            label: 'Metadata: FILE_NAME (Nama File)',
+            sampleValue: path_1.default.basename(sampleFile),
+            suggestedName: 'FILE_NAME',
+            suggestedType: 'VARCHAR2(150)',
+            sourceType: 'metadata',
+            sourceKey: 'FILE_NAME',
+        });
+        sampleTokens.push({
+            index: -3,
+            label: 'Metadata: LOAD_TIMESTAMP (SYSDATE)',
+            sampleValue: 'SYSDATE',
+            suggestedName: 'LOAD_TIMESTAMP',
+            suggestedType: 'DATE',
+            sourceType: 'metadata',
+            sourceKey: 'LOAD_TIMESTAMP',
+        });
         let suggestedTable = path_1.default
             .basename(sourceDir || sampleFile)
             .replace(/\.(txt|csv|tsv|reg)$/i, '')
@@ -359,6 +493,8 @@ class TxtBundleService {
             columns,
             previewRows,
             totalEstimatedRows,
+            rawSampleLines: lines.slice(1, 11),
+            sampleTokens,
         };
     }
     /**
@@ -421,7 +557,9 @@ class TxtBundleService {
             if (!tableExists && options.createTableStrategy !== 'append_only') {
                 const colDefinitions = options.columns.map((c) => {
                     const nullability = c.isNullable ? '' : ' NOT NULL';
-                    const defaultVal = c.name === 'LOAD_TIMESTAMP' ? ' DEFAULT SYSDATE' : '';
+                    const isSysdate = c.name === 'LOAD_TIMESTAMP' ||
+                        (c.sourceType === 'metadata' && c.sourceKey === 'LOAD_TIMESTAMP');
+                    const defaultVal = isSysdate ? ' DEFAULT SYSDATE' : '';
                     return `  "${c.name}" ${c.type}${defaultVal}${nullability}`;
                 });
                 const createTableSql = `CREATE TABLE ${fullTableName} (\n${colDefinitions.join(',\n')}\n)`;
@@ -440,7 +578,8 @@ class TxtBundleService {
             }
             // 7. Prepare Insert SQL
             // Filter out LOAD_TIMESTAMP if it defaults to SYSDATE and we don't bind it
-            const bindColumns = options.columns.filter((c) => c.name !== 'LOAD_TIMESTAMP');
+            const bindColumns = options.columns.filter((c) => c.name !== 'LOAD_TIMESTAMP' &&
+                !(c.sourceType === 'metadata' && c.sourceKey === 'LOAD_TIMESTAMP'));
             const colList = bindColumns.map((c) => `"${c.name}"`).join(', ');
             const valList = bindColumns.map((_, idx) => `:${idx + 1}`).join(', ');
             const insertSql = `INSERT INTO ${fullTableName} (${colList}) VALUES (${valList})`;
@@ -606,8 +745,24 @@ class TxtBundleService {
                         return null;
                     // Convert numeric if column type is NUMBER
                     if (col.type && col.type.toUpperCase().startsWith('NUMBER')) {
-                        const num = parseFloat(String(val));
-                        return !isNaN(num) && isFinite(Number(val)) ? num : null;
+                        const num = parseFloat(String(val).replace(/,/g, ''));
+                        return !isNaN(num) && isFinite(Number(num)) ? num : null;
+                    }
+                    // Convert Date if column type is DATE
+                    if (col.type && col.type.toUpperCase().startsWith('DATE')) {
+                        if (val instanceof Date)
+                            return val;
+                        const sVal = String(val).trim();
+                        if (/^\d{4}-\d{2}-\d{2}$/.test(sVal)) {
+                            const [y, m, d] = sVal.split('-').map(Number);
+                            return new Date(y, m - 1, d);
+                        }
+                        else if (/^\d{8}$/.test(sVal)) {
+                            const y = parseInt(sVal.slice(0, 4), 10);
+                            const m = parseInt(sVal.slice(4, 6), 10);
+                            const d = parseInt(sVal.slice(6, 8), 10);
+                            return new Date(y, m - 1, d);
+                        }
                     }
                     return val;
                 });
