@@ -430,36 +430,77 @@ class TxtBundleService {
         const previewRows = [];
         // Parse up to 20 sample rows
         for (let i = 1; i < Math.min(lines.length, 21); i++) {
-            const parts = lines[i].split(bestDelim).map((p) => p.trim().replace(/^["']|["']$/g, ''));
+            const lineText = lines[i];
+            if (!lineText || !lineText.trim())
+                continue;
+            const parts = lineText.split(bestDelim).map((p) => p.trim().replace(/^["']|["']$/g, ''));
             const rowObj = {
                 ID: crypto_1.default.randomUUID(),
             };
             rawHeaders.forEach((h, idx) => {
                 const val = parts[idx] ?? '';
-                const numVal = parseFloat(val);
-                rowObj[h] = !isNaN(numVal) && isFinite(Number(val)) ? numVal : val;
+                const cleanStr = String(val).replace(/,/g, '').trim();
+                const numVal = parseFloat(cleanStr);
+                rowObj[h] = !isNaN(numVal) && isFinite(Number(cleanStr)) && /^[-+]?\d+(\.\d+)?$/.test(cleanStr) ? numVal : val;
             });
             previewRows.push(rowObj);
         }
-        // Infer types
-        rawHeaders.forEach((h) => {
+        // Infer types based on content and column names (Financial / Transaction pattern)
+        rawHeaders.forEach((h, hIdx) => {
             let isNumeric = true;
             let sampleVal = null;
+            let hasValue = false;
             for (const row of previewRows) {
                 const val = row[h];
                 if (val !== null && val !== undefined && val !== '') {
+                    hasValue = true;
                     if (sampleVal === null)
                         sampleVal = val;
-                    if (typeof val !== 'number') {
+                    const sVal = String(val).trim().replace(/,/g, '');
+                    if (isNaN(Number(sVal)) || !isFinite(Number(sVal))) {
                         isNumeric = false;
                     }
                 }
             }
+            if (!hasValue)
+                isNumeric = false;
+            const upperName = h.toUpperCase().replace(/[^A-Z0-9_]/g, '_').slice(0, 30);
+            // Smart type guessing based on common field names in financial/banking reports
+            let inferredType = 'VARCHAR2(100)';
+            if (upperName.startsWith('TANGGAL_') ||
+                upperName.endsWith('_DATE') ||
+                upperName.endsWith('_TGL') ||
+                upperName.includes('TANGGAL')) {
+                inferredType = 'VARCHAR2(50)';
+            }
+            else if (isNumeric) {
+                if (upperName.includes('RATE') || upperName.includes('PERSEN') || upperName.includes('YIELD')) {
+                    inferredType = 'NUMBER(12,6)';
+                }
+                else if (upperName.includes('NOMINAL') || upperName.includes('PROCEED') || upperName.includes('NILAI') || upperName.includes('TOTAL')) {
+                    inferredType = 'NUMBER(20,2)';
+                }
+                else if (upperName.includes('JANGKA_WAKTU') || upperName.includes('HARI') || upperName.includes('COUNT') || upperName.includes('JUMLAH')) {
+                    inferredType = 'NUMBER(10)';
+                }
+                else {
+                    inferredType = 'NUMBER(18,6)';
+                }
+            }
+            else if (upperName === 'STATUS_SETELMEN' || upperName === 'TIPE_TRANSAKSI' || upperName === 'SERI') {
+                inferredType = 'VARCHAR2(50)';
+            }
+            else {
+                inferredType = 'VARCHAR2(255)';
+            }
             columns.push({
-                name: h.toUpperCase().replace(/[^A-Z0-9_]/g, '_').slice(0, 30),
-                type: isNumeric ? 'NUMBER(18,6)' : 'VARCHAR2(255)',
+                name: upperName,
+                type: inferredType,
                 isNullable: true,
                 sampleValue: sampleVal,
+                sourceType: 'field',
+                sourceIndex: hIdx,
+                sourceKey: h,
             });
         });
         // Metadata columns
@@ -468,6 +509,8 @@ class TxtBundleService {
             type: 'VARCHAR2(150)',
             isNullable: true,
             sampleValue: path_1.default.basename(sampleFile),
+            sourceType: 'metadata',
+            sourceKey: 'FILE_NAME',
             isMetadata: true,
         });
         columns.push({
@@ -475,18 +518,24 @@ class TxtBundleService {
             type: 'DATE',
             isNullable: true,
             sampleValue: 'SYSDATE',
+            sourceType: 'metadata',
+            sourceKey: 'LOAD_TIMESTAMP',
             isMetadata: true,
         });
         // Build sample tokens for delimited file
-        const sampleTokens = rawHeaders.map((h, idx) => ({
-            index: idx,
-            label: `Kolom ${idx + 1} (${h})`,
-            sampleValue: String(previewRows[0]?.[h] ?? ''),
-            suggestedName: h,
-            suggestedType: columns[idx]?.type || 'VARCHAR2(255)',
-            sourceType: 'field',
-            sourceKey: h,
-        }));
+        const sampleTokens = rawHeaders.map((h, idx) => {
+            const upperName = h.toUpperCase().replace(/[^A-Z0-9_]/g, '_').slice(0, 30);
+            const matchedCol = columns.find((c) => c.name === upperName);
+            return {
+                index: idx,
+                label: `Kolom ${idx + 1} (${h})`,
+                sampleValue: String(previewRows[0]?.[h] ?? ''),
+                suggestedName: upperName,
+                suggestedType: matchedCol?.type || 'VARCHAR2(255)',
+                sourceType: 'field',
+                sourceKey: h,
+            };
+        });
         sampleTokens.push({
             index: -2,
             label: 'Metadata: FILE_NAME (Nama File)',
@@ -623,10 +672,10 @@ class TxtBundleService {
             const colList = bindColumns.map((c) => `"${c.name}"`).join(', ');
             const valList = bindColumns.map((_, idx) => `:${idx + 1}`).join(', ');
             const insertSql = `INSERT INTO ${fullTableName} (${colList}) VALUES (${valList})`;
-            // 8. Stream & parse files in batches
+            // 8. Stream & parse files in batches (Turbo Batch 20,000 rows)
             let totalInsertedRows = 0;
             const batchRows = [];
-            const batchSize = options.batchSize || 500;
+            const batchSize = options.batchSize || 20000;
             for (let fileIdx = 0; fileIdx < filePaths.length; fileIdx++) {
                 const filePath = filePaths[fileIdx];
                 const fileName = path_1.default.basename(filePath);
@@ -640,11 +689,12 @@ class TxtBundleService {
                 else {
                     this.parseDelimitedRows(lines, fileName, bindColumns, batchRows);
                 }
-                // Execute batch insert if chunk reached
+                // Execute batch insert if chunk reached & commit to keep memory & undo log optimal
                 if (batchRows.length >= batchSize) {
                     await conn.executeMany(insertSql, batchRows, { autoCommit: false });
                     totalInsertedRows += batchRows.length;
                     batchRows.length = 0;
+                    await conn.commit();
                 }
                 // Report progress
                 if (onProgress) {
@@ -834,23 +884,63 @@ class TxtBundleService {
             .split(bestDelim)
             .map((h) => h.trim().replace(/^["']|["']$/g, '').toUpperCase().replace(/[^A-Z0-9_]/g, '_'));
         for (let i = 1; i < lines.length; i++) {
-            const parts = lines[i].split(bestDelim).map((p) => p.trim().replace(/^["']|["']$/g, ''));
+            const lineText = lines[i];
+            if (!lineText || !lineText.trim())
+                continue;
+            const parts = lineText.split(bestDelim).map((p) => p.trim().replace(/^["']|["']$/g, ''));
             const rowMap = {
                 FILE_NAME: fileName,
             };
             rawHeaders.forEach((h, idx) => {
                 const val = parts[idx] ?? '';
-                const numVal = parseFloat(val);
-                rowMap[h] = !isNaN(numVal) && isFinite(Number(val)) ? numVal : val;
+                rowMap[h] = val;
             });
             const rowArray = targetColumns.map((col) => {
                 if (col.sourceType === 'guid' || col.name === 'ID') {
                     return crypto_1.default.randomUUID();
                 }
-                const val = rowMap[col.name];
+                if (col.name === 'LOAD_TIMESTAMP' || col.sourceKey === 'LOAD_TIMESTAMP') {
+                    return new Date();
+                }
+                if (col.name === 'FILE_NAME' || col.sourceKey === 'FILE_NAME') {
+                    return fileName;
+                }
+                let val = rowMap[col.name];
+                if (val === undefined && col.sourceKey) {
+                    val = rowMap[col.sourceKey];
+                }
+                if (val === undefined && col.sourceIndex !== undefined) {
+                    val = parts[col.sourceIndex];
+                }
                 if (val === undefined || val === null || val === '')
                     return null;
-                return val;
+                // Convert numeric if column type is NUMBER
+                if (col.type && col.type.toUpperCase().startsWith('NUMBER')) {
+                    const cleanStr = String(val).replace(/,/g, '').trim();
+                    const num = parseFloat(cleanStr);
+                    return !isNaN(num) && isFinite(Number(cleanStr)) ? num : null;
+                }
+                // Convert Date if column type is DATE
+                if (col.type && col.type.toUpperCase().startsWith('DATE')) {
+                    if (val instanceof Date)
+                        return val;
+                    const sVal = String(val).trim();
+                    if (/^\d{4}-\d{2}-\d{2}$/.test(sVal)) {
+                        const [y, m, d] = sVal.split('-').map(Number);
+                        return new Date(y, m - 1, d);
+                    }
+                    else if (/^\d{8}$/.test(sVal)) {
+                        const y = parseInt(sVal.slice(0, 4), 10);
+                        const m = parseInt(sVal.slice(4, 6), 10);
+                        const d = parseInt(sVal.slice(6, 8), 10);
+                        return new Date(y, m - 1, d);
+                    }
+                    else if (/^\d{2}[\/\-]\d{2}[\/\-]\d{4}$/.test(sVal)) {
+                        const [d, m, y] = sVal.split(/[\/\-]/).map(Number);
+                        return new Date(y, m - 1, d);
+                    }
+                }
+                return String(val);
             });
             outBatch.push(rowArray);
         }

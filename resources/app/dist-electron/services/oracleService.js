@@ -984,7 +984,7 @@ class OracleService {
                                 emitLog('info', `[TURBO STREAM] Streaming ${targetTotalRows.toLocaleString()} rows ${rowLimit ? `(User Limit: ${rowLimit.toLocaleString()} rows) ` : ''}for ${item.name}...`);
                                 const tableStartTime = Date.now();
                                 // Fetch rows from source using high-speed streaming ResultSet with large buffer
-                                const BATCH_SIZE = 5000;
+                                const BATCH_SIZE = 25000;
                                 const srcRes = await sourceConn.execute(querySql, [], {
                                     resultSet: true,
                                     fetchArraySize: BATCH_SIZE,
@@ -1063,8 +1063,8 @@ class OracleService {
                                         totalPreserved += batchErrorsCount;
                                         totalProcessed += rows.length;
                                         uncommittedRows += rows.length;
-                                        // Commit every 10,000 rows to minimize roundtrips while keeping memory optimal
-                                        if (uncommittedRows >= 10000) {
+                                        // Commit every 25,000 rows to minimize roundtrips while keeping memory optimal
+                                        if (uncommittedRows >= 25000) {
                                             await targetConn.commit();
                                             uncommittedRows = 0;
                                         }
