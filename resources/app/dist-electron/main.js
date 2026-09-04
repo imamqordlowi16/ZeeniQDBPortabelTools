@@ -170,7 +170,7 @@ electron_1.ipcMain.handle('ai:call-provider', async (_, params) => {
     }
     try {
         if (provider === 'gemini') {
-            const selectedModel = model || 'gemini-2.5-flash';
+            const selectedModel = model === 'gemini-2.5-flash' ? 'gemini-3.6-flash' : (model || 'gemini-3.6-flash');
             const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
             const res = await fetch(endpoint, {
                 method: 'POST',
