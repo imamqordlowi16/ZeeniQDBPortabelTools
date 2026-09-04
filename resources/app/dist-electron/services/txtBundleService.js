@@ -179,6 +179,8 @@ class TxtBundleService {
                 type: 'VARCHAR2(10)',
                 isNullable: false,
                 sampleValue: previewRows[0]?.RUNDATE || '2025-07-01',
+                sourceType: 'header',
+                sourceKey: 'RUNDATE',
                 isMetadata: true,
             },
             {
@@ -186,22 +188,31 @@ class TxtBundleService {
                 type: 'VARCHAR2(50)',
                 isNullable: false,
                 sampleValue: previewRows[0]?.SECURITY_ID || 'CTIDR1Y Govt',
+                sourceType: 'token',
+                sourceIndex: 0,
+                sourceKey: 'SECURITY_ID',
             },
             {
                 name: 'STATUS_CODE',
                 type: 'NUMBER(4)',
                 isNullable: true,
                 sampleValue: 0,
+                sourceType: 'token',
+                sourceIndex: 1,
+                sourceKey: 'STATUS_CODE',
             },
             {
                 name: 'NUM_FIELDS',
                 type: 'NUMBER(4)',
                 isNullable: true,
                 sampleValue: bbgFields.length,
+                sourceType: 'token',
+                sourceIndex: 2,
+                sourceKey: 'NUM_FIELDS',
             },
         ];
         // Infer column data types for bbgFields
-        for (const f of bbgFields) {
+        bbgFields.forEach((f, fIdx) => {
             let isNumeric = true;
             let sampleVal = null;
             for (const row of previewRows) {
@@ -219,14 +230,19 @@ class TxtBundleService {
                 type: isNumeric ? 'NUMBER(18,6)' : 'VARCHAR2(100)',
                 isNullable: true,
                 sampleValue: sampleVal,
+                sourceType: 'field',
+                sourceIndex: 3 + fIdx,
+                sourceKey: f,
             });
-        }
+        });
         // Add metadata columns
         columns.push({
             name: 'FILE_NAME',
             type: 'VARCHAR2(150)',
             isNullable: true,
             sampleValue: path_1.default.basename(filePaths[0]),
+            sourceType: 'metadata',
+            sourceKey: 'FILE_NAME',
             isMetadata: true,
         });
         columns.push({
@@ -234,6 +250,8 @@ class TxtBundleService {
             type: 'DATE',
             isNullable: true,
             sampleValue: 'SYSDATE',
+            sourceType: 'metadata',
+            sourceKey: 'LOAD_TIMESTAMP',
             isMetadata: true,
         });
         const totalEstimatedRows = filePaths.length * (rowsPerFile || 6);
@@ -562,9 +580,35 @@ class TxtBundleService {
                 });
                 // Map into targetColumns array order
                 const rowArray = targetColumns.map((col) => {
-                    const val = rowMap[col.name];
+                    let val = null;
+                    if (col.sourceType === 'token' && col.sourceIndex !== undefined) {
+                        val = parts[col.sourceIndex]?.trim();
+                    }
+                    else if (col.sourceType === 'field' && col.sourceIndex !== undefined) {
+                        val = parts[col.sourceIndex]?.trim();
+                    }
+                    else if (col.sourceKey && rowMap[col.sourceKey] !== undefined) {
+                        val = rowMap[col.sourceKey];
+                    }
+                    else if (rowMap[col.name] !== undefined) {
+                        val = rowMap[col.name];
+                    }
+                    else if (col.sourceType === 'header' && (col.sourceKey === 'RUNDATE' || col.name.includes('DATE'))) {
+                        val = formattedRundate;
+                    }
+                    else if (col.sourceType === 'metadata' && (col.sourceKey === 'FILE_NAME' || col.name === 'FILE_NAME')) {
+                        val = fileName;
+                    }
+                    else if (col.sourceIndex !== undefined && parts[col.sourceIndex] !== undefined) {
+                        val = parts[col.sourceIndex]?.trim();
+                    }
                     if (val === undefined || val === null || val === '')
                         return null;
+                    // Convert numeric if column type is NUMBER
+                    if (col.type && col.type.toUpperCase().startsWith('NUMBER')) {
+                        const num = parseFloat(String(val));
+                        return !isNaN(num) && isFinite(Number(val)) ? num : null;
+                    }
                     return val;
                 });
                 outBatch.push(rowArray);
