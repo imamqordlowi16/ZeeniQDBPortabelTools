@@ -391,6 +391,146 @@ class TxtBundleService {
         };
     }
     /**
+     * Parse single delimited line supporting RFC 4180 quotes, escaped quotes, and commas inside quotes
+     */
+    parseDelimitedLine(text, delimiter = ',') {
+        const results = [];
+        let cur = '';
+        let inQuotes = false;
+        for (let i = 0; i < text.length; i++) {
+            const ch = text[i];
+            if (ch === '"') {
+                if (inQuotes && text[i + 1] === '"') {
+                    cur += '"';
+                    i++; // Skip escaped quote
+                }
+                else {
+                    inQuotes = !inQuotes;
+                }
+            }
+            else if (ch === delimiter && !inQuotes) {
+                results.push(cur.trim());
+                cur = '';
+            }
+            else {
+                cur += ch;
+            }
+        }
+        results.push(cur.trim());
+        return results.map((v) => v.replace(/^["']|["']$/g, '').trim());
+    }
+    /**
+     * Find and parse accompanying .sql DDL file in the same directory (e.g. KINERJABANK_EXCEL.sql)
+     */
+    findAccompanyingSqlDdl(sampleFilePath) {
+        try {
+            const dir = path_1.default.dirname(sampleFilePath);
+            const baseName = path_1.default.basename(sampleFilePath).replace(/\.(csv|txt|tsv|reg|dat)$/i, '');
+            const candidates = [
+                path_1.default.join(dir, `${baseName}.sql`),
+                path_1.default.join(dir, `${baseName.replace(/_DATA_TABLE$/i, '')}.sql`),
+                path_1.default.join(dir, `${baseName.replace(/_DATA$/i, '')}.sql`),
+                path_1.default.join(dir, `${baseName.replace(/_TABLE$/i, '')}.sql`),
+            ];
+            let foundSqlPath = candidates.find((p) => fs_1.default.existsSync(p));
+            if (!foundSqlPath && fs_1.default.existsSync(dir)) {
+                const allSql = fs_1.default.readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.sql'));
+                if (allSql.length === 1) {
+                    foundSqlPath = path_1.default.join(dir, allSql[0]);
+                }
+            }
+            if (!foundSqlPath)
+                return null;
+            const sqlContent = fs_1.default.readFileSync(foundSqlPath, 'utf8');
+            const tableMatch = sqlContent.match(/CREATE\s+TABLE\s+(?:\"?([A-Za-z0-9_]+)\"?\.)?\"?([A-Za-z0-9_]+)\"?\s*\(([\s\S]+?)\)\s*(?:NOCOMPRESS|LOGGING|PCTFREE|STORAGE|;|$)/i);
+            if (!tableMatch)
+                return null;
+            const tableName = tableMatch[2];
+            const body = tableMatch[3];
+            const lines = body.split('\n').map((l) => l.trim()).filter(Boolean);
+            const columns = new Map();
+            for (const line of lines) {
+                const clean = line.replace(/,$/, '').trim();
+                if (/^(?:CONSTRAINT|PRIMARY|KEY|FOREIGN|UNIQUE|CHECK)/i.test(clean))
+                    continue;
+                const colMatch = clean.match(/^\"?([A-Za-z0-9_]+)\"?\s+([A-Za-z0-9_]+(?:\s*\([^)]+\))?)(?:\s+(NOT\s+NULL))?/i);
+                if (colMatch) {
+                    columns.set(colMatch[1].toUpperCase(), {
+                        type: colMatch[2].toUpperCase().replace(/\s+/g, ''),
+                        isNullable: !colMatch[3],
+                    });
+                }
+            }
+            return { tableName, columns };
+        }
+        catch (e) {
+            return null;
+        }
+    }
+    /**
+     * Flexible Date Parser for Oracle batch insertion
+     */
+    parseFlexDate(val) {
+        if (val === null || val === undefined)
+            return null;
+        if (val instanceof Date)
+            return val;
+        const sVal = String(val).trim();
+        if (!sVal)
+            return null;
+        // DD-MON-YY or DD-MON-YYYY (e.g. 06-AUG-24, 06-AUG-2024, 06-AGU-24, 15-PEB-2023)
+        const monMatch = sVal.match(/^(\d{1,2})[-/ ]([A-Za-z]{3})[-/ ](\d{2,4})$/);
+        if (monMatch) {
+            const day = parseInt(monMatch[1], 10);
+            const monStr = monMatch[2].toLowerCase();
+            let year = parseInt(monMatch[3], 10);
+            if (year < 100)
+                year += year < 50 ? 2000 : 1900;
+            const months = {
+                jan: 0,
+                feb: 1,
+                peb: 1,
+                mar: 2,
+                apr: 3,
+                may: 4,
+                mei: 4,
+                jun: 5,
+                jul: 6,
+                aug: 7,
+                agu: 7,
+                ags: 7,
+                sep: 8,
+                oct: 9,
+                okt: 9,
+                nov: 10,
+                nop: 10,
+                dec: 11,
+                des: 11,
+            };
+            if (months[monStr] !== undefined) {
+                return new Date(year, months[monStr], day);
+            }
+        }
+        // YYYY-MM-DD or YYYY-MM-DD HH:mm:ss
+        if (/^\d{4}-\d{2}-\d{2}/.test(sVal)) {
+            const parts = sVal.split(/[- :]/).map(Number);
+            return new Date(parts[0], parts[1] - 1, parts[2], parts[3] || 0, parts[4] || 0, parts[5] || 0);
+        }
+        // YYYYMMDD
+        if (/^\d{8}$/.test(sVal)) {
+            const y = parseInt(sVal.slice(0, 4), 10);
+            const m = parseInt(sVal.slice(4, 6), 10);
+            const d = parseInt(sVal.slice(6, 8), 10);
+            return new Date(y, m - 1, d);
+        }
+        // DD/MM/YYYY or DD-MM-YYYY
+        if (/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4}$/.test(sVal)) {
+            const [d, m, y] = sVal.split(/[\/\-]/).map(Number);
+            return new Date(y, m - 1, d);
+        }
+        return null;
+    }
+    /**
      * Analyze Generic Delimited bundle (CSV, Pipe, Tab, Semicolon)
      */
     analyzeDelimitedBundle(sourceDir, filePaths) {
@@ -403,19 +543,21 @@ class TxtBundleService {
         if (lines.length === 0) {
             throw new Error('File sampel kosong.');
         }
+        // Check for accompanying .sql file in same folder
+        const sqlDdl = this.findAccompanyingSqlDdl(sampleFile);
         // Detect delimiter
         const headerLine = lines[0];
         const delimiters = ['|', ',', '\t', ';'];
         let bestDelim = ',';
         let maxCols = 0;
         for (const d of delimiters) {
-            const count = headerLine.split(d).length;
-            if (count > maxCols) {
-                maxCols = count;
+            const parts = this.parseDelimitedLine(headerLine, d);
+            if (parts.length > maxCols) {
+                maxCols = parts.length;
                 bestDelim = d;
             }
         }
-        const rawHeaders = headerLine.split(bestDelim).map((h) => h.trim().replace(/^["']|["']$/g, ''));
+        const rawHeaders = this.parseDelimitedLine(headerLine, bestDelim);
         const columns = [
             {
                 name: 'ID',
@@ -433,71 +575,123 @@ class TxtBundleService {
             const lineText = lines[i];
             if (!lineText || !lineText.trim())
                 continue;
-            const parts = lineText.split(bestDelim).map((p) => p.trim().replace(/^["']|["']$/g, ''));
+            const parts = this.parseDelimitedLine(lineText, bestDelim);
             const rowObj = {
                 ID: crypto_1.default.randomUUID(),
             };
             rawHeaders.forEach((h, idx) => {
                 const val = parts[idx] ?? '';
                 const cleanStr = String(val).replace(/,/g, '').trim();
-                const numVal = parseFloat(cleanStr);
-                rowObj[h] = !isNaN(numVal) && isFinite(Number(cleanStr)) && /^[-+]?\d+(\.\d+)?$/.test(cleanStr) ? numVal : val;
+                // Preserves leading zeroes for codes / IDs (e.g. '037', '01')
+                const hasLeadingZero = cleanStr.length > 1 && /^0\d+$/.test(cleanStr);
+                const isNumeric = !hasLeadingZero &&
+                    cleanStr !== '' &&
+                    !isNaN(Number(cleanStr)) &&
+                    isFinite(Number(cleanStr)) &&
+                    /^[-+]?\d+(\.\d+)?$/.test(cleanStr);
+                rowObj[h] = isNumeric ? parseFloat(cleanStr) : val;
             });
             previewRows.push(rowObj);
         }
-        // Infer types based on content and column names (Financial / Transaction pattern)
+        // Infer types based on DDL SQL or content and column names (Financial / Transaction pattern)
         rawHeaders.forEach((h, hIdx) => {
-            let isNumeric = true;
-            let sampleVal = null;
-            let hasValue = false;
-            for (const row of previewRows) {
-                const val = row[h];
-                if (val !== null && val !== undefined && val !== '') {
-                    hasValue = true;
-                    if (sampleVal === null)
-                        sampleVal = val;
-                    const sVal = String(val).trim().replace(/,/g, '');
-                    if (isNaN(Number(sVal)) || !isFinite(Number(sVal))) {
-                        isNumeric = false;
-                    }
-                }
-            }
-            if (!hasValue)
-                isNumeric = false;
             const upperName = h.toUpperCase().replace(/[^A-Z0-9_]/g, '_').slice(0, 30);
-            // Smart type guessing based on common field names in financial/banking reports
+            const sqlCol = sqlDdl?.columns.get(upperName);
             let inferredType = 'VARCHAR2(100)';
-            if (upperName.startsWith('TANGGAL_') ||
-                upperName.endsWith('_DATE') ||
-                upperName.endsWith('_TGL') ||
-                upperName.includes('TANGGAL')) {
-                inferredType = 'VARCHAR2(50)';
-            }
-            else if (isNumeric) {
-                if (upperName.includes('RATE') || upperName.includes('PERSEN') || upperName.includes('YIELD')) {
-                    inferredType = 'NUMBER(12,6)';
-                }
-                else if (upperName.includes('NOMINAL') || upperName.includes('PROCEED') || upperName.includes('NILAI') || upperName.includes('TOTAL')) {
-                    inferredType = 'NUMBER(20,2)';
-                }
-                else if (upperName.includes('JANGKA_WAKTU') || upperName.includes('HARI') || upperName.includes('COUNT') || upperName.includes('JUMLAH')) {
-                    inferredType = 'NUMBER(10)';
-                }
-                else {
-                    inferredType = 'NUMBER(18,6)';
-                }
-            }
-            else if (upperName === 'STATUS_SETELMEN' || upperName === 'TIPE_TRANSAKSI' || upperName === 'SERI') {
-                inferredType = 'VARCHAR2(50)';
+            let isNullable = true;
+            if (sqlCol) {
+                inferredType = sqlCol.type;
+                isNullable = sqlCol.isNullable;
             }
             else {
-                inferredType = 'VARCHAR2(255)';
+                let isNumeric = true;
+                let hasLeadingZero = false;
+                let sampleVal = null;
+                let hasValue = false;
+                let matchesDate = false;
+                for (const row of previewRows) {
+                    const val = row[h];
+                    if (val !== null && val !== undefined && val !== '') {
+                        hasValue = true;
+                        if (sampleVal === null)
+                            sampleVal = val;
+                        const sVal = String(val).trim();
+                        if (sVal.length > 1 && /^0\d+$/.test(sVal)) {
+                            hasLeadingZero = true;
+                        }
+                        if (this.parseFlexDate(sVal) !== null) {
+                            matchesDate = true;
+                        }
+                        const clean = sVal.replace(/,/g, '');
+                        if (isNaN(Number(clean)) || !isFinite(Number(clean)) || !/^[-+]?\d+(\.\d+)?$/.test(clean)) {
+                            isNumeric = false;
+                        }
+                    }
+                }
+                if (!hasValue || hasLeadingZero)
+                    isNumeric = false;
+                if (upperName.startsWith('ID_') ||
+                    upperName.startsWith('KODE_') ||
+                    upperName.startsWith('SANDI_') ||
+                    upperName.startsWith('NO_') ||
+                    upperName.startsWith('NOREK') ||
+                    upperName.includes('KODE') ||
+                    upperName === 'CIF' ||
+                    upperName === 'NPWP' ||
+                    upperName === 'NIK' ||
+                    hasLeadingZero) {
+                    inferredType = 'VARCHAR2(50)';
+                }
+                else if (upperName.startsWith('TANGGAL_') ||
+                    upperName.endsWith('_DATE') ||
+                    upperName.endsWith('_TGL') ||
+                    upperName.startsWith('TGL_') ||
+                    upperName.includes('TANGGAL') ||
+                    matchesDate) {
+                    inferredType = matchesDate ? 'DATE' : 'VARCHAR2(50)';
+                }
+                else if (upperName === 'TAHUN') {
+                    inferredType = 'NUMBER(4)';
+                }
+                else if (upperName === 'BULAN') {
+                    inferredType = 'NUMBER(2)';
+                }
+                else if (isNumeric) {
+                    if (upperName.includes('RATE') || upperName.includes('PERSEN') || upperName.includes('YIELD')) {
+                        inferredType = 'NUMBER(12,6)';
+                    }
+                    else if (upperName.includes('NOMINAL') ||
+                        upperName.includes('PROCEED') ||
+                        upperName.includes('NILAI') ||
+                        upperName.includes('TOTAL') ||
+                        upperName.includes('SALDO')) {
+                        inferredType = 'NUMBER(20,4)';
+                    }
+                    else if (upperName.includes('JANGKA_WAKTU') ||
+                        upperName.includes('HARI') ||
+                        upperName.includes('COUNT') ||
+                        upperName.includes('JUMLAH')) {
+                        inferredType = 'NUMBER(10)';
+                    }
+                    else {
+                        inferredType = 'NUMBER(18,6)';
+                    }
+                }
+                else if (upperName === 'STATUS_SETELMEN' ||
+                    upperName === 'TIPE_TRANSAKSI' ||
+                    upperName === 'SERI' ||
+                    upperName === 'JENIS_USAHA') {
+                    inferredType = 'VARCHAR2(50)';
+                }
+                else {
+                    inferredType = 'VARCHAR2(255)';
+                }
             }
             columns.push({
                 name: upperName,
                 type: inferredType,
-                isNullable: true,
-                sampleValue: sampleVal,
+                isNullable,
+                sampleValue: previewRows[0]?.[h] ?? null,
                 sourceType: 'field',
                 sourceIndex: hIdx,
                 sourceKey: h,
@@ -554,16 +748,31 @@ class TxtBundleService {
             sourceType: 'metadata',
             sourceKey: 'LOAD_TIMESTAMP',
         });
-        let suggestedTable = path_1.default
-            .basename(sourceDir || sampleFile)
-            .replace(/\.(txt|csv|tsv|reg)$/i, '')
-            .toUpperCase()
-            .replace(/[^A-Z0-9_]/g, '_');
-        if (!suggestedTable.startsWith('DATA_')) {
-            suggestedTable = `DATA_${suggestedTable}`;
+        // Determine suggested table name
+        let suggestedTable = '';
+        if (sqlDdl?.tableName) {
+            suggestedTable = sqlDdl.tableName.toUpperCase().replace(/[^A-Z0-9_]/g, '');
+        }
+        else if (filePaths.length === 1 || path_1.default.extname(sampleFile)) {
+            let base = path_1.default
+                .basename(sampleFile)
+                .replace(/\.(csv|txt|tsv|reg|dat)$/i, '')
+                .toUpperCase()
+                .replace(/[^A-Z0-9_]/g, '_');
+            base = base.replace(/_DATA_TABLE$/i, '').replace(/_DATA$/i, '').replace(/_TABLE$/i, '');
+            suggestedTable = base;
+        }
+        else if (sourceDir) {
+            suggestedTable = path_1.default
+                .basename(sourceDir)
+                .toUpperCase()
+                .replace(/[^A-Z0-9_]/g, '_');
+            if (!suggestedTable.startsWith('DATA_')) {
+                suggestedTable = `DATA_${suggestedTable}`;
+            }
         }
         suggestedTable = suggestedTable.slice(0, 30);
-        if (!suggestedTable || suggestedTable === 'DATA_')
+        if (!suggestedTable)
             suggestedTable = 'DATA_IMPORT';
         const totalEstimatedRows = filePaths.length * (lines.length - 1);
         return {
@@ -606,6 +815,10 @@ class TxtBundleService {
             }
             if (filePaths.length === 0) {
                 throw new Error('Tidak ada file yang dapat di-import.');
+            }
+            // Handle metadata columns toggle
+            if (!options.includeMetadata) {
+                options.columns = options.columns.filter((c) => !c.isMetadata && c.name !== 'FILE_NAME' && c.name !== 'LOAD_TIMESTAMP');
             }
             // 2. Connect to Oracle
             conn = await this.oracleService.createConnection(config);
@@ -874,20 +1087,18 @@ class TxtBundleService {
         let bestDelim = ',';
         let maxCols = 0;
         for (const d of delimiters) {
-            const count = headerLine.split(d).length;
-            if (count > maxCols) {
-                maxCols = count;
+            const parts = this.parseDelimitedLine(headerLine, d);
+            if (parts.length > maxCols) {
+                maxCols = parts.length;
                 bestDelim = d;
             }
         }
-        const rawHeaders = headerLine
-            .split(bestDelim)
-            .map((h) => h.trim().replace(/^["']|["']$/g, '').toUpperCase().replace(/[^A-Z0-9_]/g, '_'));
+        const rawHeaders = this.parseDelimitedLine(headerLine, bestDelim).map((h) => h.toUpperCase().replace(/[^A-Z0-9_]/g, '_'));
         for (let i = 1; i < lines.length; i++) {
             const lineText = lines[i];
             if (!lineText || !lineText.trim())
                 continue;
-            const parts = lineText.split(bestDelim).map((p) => p.trim().replace(/^["']|["']$/g, ''));
+            const parts = this.parseDelimitedLine(lineText, bestDelim);
             const rowMap = {
                 FILE_NAME: fileName,
             };
@@ -917,28 +1128,14 @@ class TxtBundleService {
                 // Convert numeric if column type is NUMBER
                 if (col.type && col.type.toUpperCase().startsWith('NUMBER')) {
                     const cleanStr = String(val).replace(/,/g, '').trim();
+                    if (cleanStr === '' || cleanStr === 'null' || cleanStr === '-')
+                        return null;
                     const num = parseFloat(cleanStr);
                     return !isNaN(num) && isFinite(Number(cleanStr)) ? num : null;
                 }
                 // Convert Date if column type is DATE
                 if (col.type && col.type.toUpperCase().startsWith('DATE')) {
-                    if (val instanceof Date)
-                        return val;
-                    const sVal = String(val).trim();
-                    if (/^\d{4}-\d{2}-\d{2}$/.test(sVal)) {
-                        const [y, m, d] = sVal.split('-').map(Number);
-                        return new Date(y, m - 1, d);
-                    }
-                    else if (/^\d{8}$/.test(sVal)) {
-                        const y = parseInt(sVal.slice(0, 4), 10);
-                        const m = parseInt(sVal.slice(4, 6), 10);
-                        const d = parseInt(sVal.slice(6, 8), 10);
-                        return new Date(y, m - 1, d);
-                    }
-                    else if (/^\d{2}[\/\-]\d{2}[\/\-]\d{4}$/.test(sVal)) {
-                        const [d, m, y] = sVal.split(/[\/\-]/).map(Number);
-                        return new Date(y, m - 1, d);
-                    }
+                    return this.parseFlexDate(val);
                 }
                 return String(val);
             });

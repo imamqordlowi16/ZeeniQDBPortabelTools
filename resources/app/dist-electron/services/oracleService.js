@@ -1671,6 +1671,53 @@ class OracleService {
         }
         return stmts;
     }
+    extractStatementTitle(stmt) {
+        // 1. Check for comment like "-- FORM: <title>" or "-- Form: <title>"
+        const formMatch = stmt.match(/--\s*(?:FORM|Form|form)\s*:\s*([^\r\n]+)/i);
+        if (formMatch && formMatch[1].trim()) {
+            let title = formMatch[1].trim();
+            title = title.replace(/\s*-\s*poslaporanposisikeuangan.*$/i, '');
+            return title.slice(0, 50);
+        }
+        // 2. Check for other comment title line (excluding separator lines)
+        const lines = stmt.split('\n');
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('--')) {
+                const comment = trimmed.replace(/^--+\s*/, '').trim();
+                if (comment &&
+                    !comment.startsWith('=') &&
+                    !comment.startsWith('-') &&
+                    !comment.startsWith('🔍') &&
+                    !comment.toLowerCase().startsWith('kolom sesuai') &&
+                    !comment.toLowerCase().startsWith('schema validation') &&
+                    !comment.toLowerCase().startsWith('total indikator')) {
+                    return comment.slice(0, 45);
+                }
+            }
+            else if (trimmed) {
+                break;
+            }
+        }
+        // 3. Extract table name from FROM clause: FROM [SCHEMA.]TABLE_NAME
+        const fromMatch = stmt.match(/\bFROM\s+([A-Za-z0-9_$."]+)/i);
+        if (fromMatch && fromMatch[1]) {
+            const parts = fromMatch[1].replace(/["']/g, '').split('.');
+            return parts[parts.length - 1];
+        }
+        // 4. Extract first column alias or DML command
+        const dmlMatch = stmt.match(/\b(UPDATE|INSERT\s+INTO|DELETE\s+FROM|CREATE\s+TABLE|ALTER\s+TABLE)\s+([A-Za-z0-9_$."]+)/i);
+        if (dmlMatch) {
+            const cleanTarget = dmlMatch[2].replace(/["']/g, '').split('.').pop();
+            return `${dmlMatch[1].toUpperCase()} ${cleanTarget}`;
+        }
+        // 5. Check for SELECT ... AS <alias>
+        const asMatch = stmt.match(/\bAS\s+([A-Za-z0-9_]+)/i);
+        if (asMatch && asMatch[1]) {
+            return asMatch[1];
+        }
+        return 'Query';
+    }
     async executeQuery(config, sql, maxRows = 1000, targetSchema) {
         const startTime = Date.now();
         let conn = null;
@@ -1705,7 +1752,7 @@ class OracleService {
                     executionTimeMs: Date.now() - startTime,
                 };
             }
-            let lastQueryResult = null;
+            const statementResults = [];
             let totalAffectedRows = 0;
             for (const stmt of stmts) {
                 // Strip trailing semicolon or slash from individual statement
@@ -1717,75 +1764,118 @@ class OracleService {
                     .replace(/--[^\r\n]*/g, '')
                     .replace(/\/\*[\s\S]*?\*\//g, '')
                     .trim();
+                if (!strippedForDetection)
+                    continue; // skip pure comment blocks
+                const stmtStart = Date.now();
+                const title = this.extractStatementTitle(cleanStmt);
                 const isSelect = /^(SELECT|WITH)\s+/i.test(strippedForDetection);
-                if (isSelect) {
-                    const result = await conn.execute(cleanStmt, [], {
-                        maxRows: maxRows,
-                        outFormat: oracledb_1.default.OUT_FORMAT_ARRAY,
-                    });
-                    const columnMeta = (result.metaData || []).map((m) => {
-                        let typeStr = m.dbTypeName || '';
-                        if (!typeStr && m.dbType) {
-                            typeStr = String(m.dbType);
-                        }
-                        if (typeStr === 'VARCHAR2' || typeStr === 'CHAR') {
-                            if (m.byteSize)
-                                typeStr += `(${m.byteSize})`;
-                        }
-                        else if (typeStr === 'NUMBER') {
-                            if (m.precision) {
-                                typeStr += m.scale ? `(${m.precision},${m.scale})` : `(${m.precision})`;
+                try {
+                    if (isSelect) {
+                        const result = await conn.execute(cleanStmt, [], {
+                            maxRows: maxRows,
+                            outFormat: oracledb_1.default.OUT_FORMAT_ARRAY,
+                        });
+                        const columnMeta = (result.metaData || []).map((m) => {
+                            let typeStr = m.dbTypeName || '';
+                            if (!typeStr && m.dbType) {
+                                typeStr = String(m.dbType);
                             }
-                        }
-                        return {
-                            name: m.name,
-                            dataType: typeStr || 'VARCHAR2',
-                            nullable: m.nullable,
-                            precision: m.precision,
-                            scale: m.scale,
-                            byteSize: m.byteSize,
-                        };
-                    });
-                    const columns = (result.metaData || []).map((m) => m.name);
-                    const rows = (result.rows || []).map((row) => row.map((val, colIdx) => {
-                        if (val === null || val === undefined)
-                            return null;
-                        if (val instanceof Date)
-                            return val.toISOString();
-                        if (Buffer.isBuffer(val)) {
-                            const meta = columnMeta[colIdx];
-                            const isRawType = meta?.dataType?.toUpperCase().includes('RAW');
-                            if (isRawType || val.length === 16) {
-                                return val.toString('hex').toUpperCase();
+                            if (typeStr === 'VARCHAR2' || typeStr === 'CHAR') {
+                                if (m.byteSize)
+                                    typeStr += `(${m.byteSize})`;
                             }
-                            return `[BLOB ${val.length} bytes]`;
-                        }
-                        return String(val);
-                    }));
-                    lastQueryResult = {
-                        success: true,
-                        columns,
-                        columnMeta,
-                        rows,
-                        rowCount: rows.length,
-                        executionTimeMs: Date.now() - startTime,
-                    };
+                            else if (typeStr === 'NUMBER') {
+                                if (m.precision) {
+                                    typeStr += m.scale ? `(${m.precision},${m.scale})` : `(${m.precision})`;
+                                }
+                            }
+                            return {
+                                name: m.name,
+                                dataType: typeStr || 'VARCHAR2',
+                                nullable: m.nullable,
+                                precision: m.precision,
+                                scale: m.scale,
+                                byteSize: m.byteSize,
+                            };
+                        });
+                        const columns = (result.metaData || []).map((m) => m.name);
+                        const rows = (result.rows || []).map((row) => row.map((val, colIdx) => {
+                            if (val === null || val === undefined)
+                                return null;
+                            if (val instanceof Date)
+                                return val.toISOString();
+                            if (Buffer.isBuffer(val)) {
+                                const meta = columnMeta[colIdx];
+                                const isRawType = meta?.dataType?.toUpperCase().includes('RAW');
+                                if (isRawType || val.length === 16) {
+                                    return val.toString('hex').toUpperCase();
+                                }
+                                return `[BLOB ${val.length} bytes]`;
+                            }
+                            return String(val);
+                        }));
+                        statementResults.push({
+                            sql: cleanStmt,
+                            title,
+                            success: true,
+                            columns,
+                            columnMeta,
+                            rows,
+                            rowCount: rows.length,
+                            executionTimeMs: Date.now() - stmtStart,
+                        });
+                    }
+                    else {
+                        const result = await conn.execute(cleanStmt, [], { autoCommit: true });
+                        const affected = result.rowsAffected ?? 0;
+                        totalAffectedRows += affected;
+                        statementResults.push({
+                            sql: cleanStmt,
+                            title,
+                            success: true,
+                            columns: [],
+                            rows: [],
+                            rowCount: 0,
+                            affectedRows: affected,
+                            executionTimeMs: Date.now() - stmtStart,
+                        });
+                    }
                 }
-                else {
-                    const result = await conn.execute(cleanStmt, [], { autoCommit: true });
-                    totalAffectedRows += result.rowsAffected ?? 0;
+                catch (stmtErr) {
+                    statementResults.push({
+                        sql: cleanStmt,
+                        title,
+                        success: false,
+                        columns: [],
+                        rows: [],
+                        rowCount: 0,
+                        executionTimeMs: Date.now() - stmtStart,
+                        error: stmtErr?.message || String(stmtErr),
+                    });
                 }
             }
-            if (lastQueryResult) {
-                return lastQueryResult;
+            if (statementResults.length === 0) {
+                return {
+                    success: true,
+                    columns: [],
+                    rows: [],
+                    rowCount: 0,
+                    executionTimeMs: Date.now() - startTime,
+                };
             }
+            // Default primary view to the first successful query with rows, or first statement
+            const primary = statementResults.find((s) => s.success && s.rows && s.rows.length > 0) || statementResults[0];
+            const hasAnySuccess = statementResults.some((s) => s.success);
             return {
-                success: true,
-                columns: [],
-                rows: [],
-                rowCount: 0,
+                success: hasAnySuccess,
+                columns: primary.columns,
+                columnMeta: primary.columnMeta,
+                rows: primary.rows,
+                rowCount: primary.rowCount,
                 affectedRows: totalAffectedRows,
                 executionTimeMs: Date.now() - startTime,
+                error: hasAnySuccess ? undefined : statementResults.find((s) => s.error)?.error,
+                statementResults,
             };
         }
         catch (err) {
