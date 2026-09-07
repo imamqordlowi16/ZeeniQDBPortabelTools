@@ -164,8 +164,8 @@ electron_1.ipcMain.handle('oracle:execute-query', async (_, config, sql, maxRows
 electron_1.ipcMain.handle('oracle:import-data', async (_, config, options) => {
     return await oracleService.importDataBatch(config, options);
 });
-electron_1.ipcMain.handle('oracle:drop-table', async (_, config, schema, tableName, purge) => {
-    return await oracleService.dropTable(config, schema, tableName, purge);
+electron_1.ipcMain.handle('oracle:drop-table', async (_, config, schemaName, tableName, purge, cascade) => {
+    return await oracleService.dropTable(config, schemaName, tableName, purge ?? true, cascade ?? false);
 });
 // ==================== AI COPILOT HANDLERS ====================
 electron_1.ipcMain.handle('ai:call-provider', async (_, params) => {

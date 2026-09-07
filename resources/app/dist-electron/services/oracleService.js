@@ -458,6 +458,48 @@ class OracleService {
             }
         }
     }
+    /**
+     * Drop Oracle Table with PURGE and optional CASCADE CONSTRAINTS
+     */
+    async dropTable(config, schemaName, tableName, purge = true, cascade = false) {
+        const cleanSchema = schemaName.toUpperCase().replace(/[^A-Z0-9_]/g, '');
+        const cleanTable = tableName.toUpperCase().replace(/[^A-Z0-9_]/g, '');
+        if (!cleanTable) {
+            throw new Error('Nama tabel tidak boleh kosong.');
+        }
+        const fullTableName = `"${cleanSchema}"."${cleanTable}"`;
+        let conn = null;
+        try {
+            conn = await this.createConnection(config);
+            let sql = `DROP TABLE ${fullTableName}`;
+            if (cascade) {
+                sql += ` CASCADE CONSTRAINTS`;
+            }
+            if (purge) {
+                sql += ` PURGE`;
+            }
+            await conn.execute(sql);
+            return {
+                success: true,
+                message: `Tabel ${fullTableName} berhasil dihapus dari database${purge ? ' (PURGE)' : ''}.`,
+            };
+        }
+        catch (err) {
+            const errMsg = String(err?.message || err);
+            if (!cascade && (errMsg.includes('ORA-02449') || errMsg.includes('foreign key'))) {
+                throw new Error(`Gagal menghapus ${fullTableName}: Terdapat Foreign Key dari tabel lain yang merujuk ke tabel ini (ORA-02449). Silakan centang opsi "Hapus Relasi (CASCADE CONSTRAINTS)".`);
+            }
+            throw new Error(`Gagal menghapus tabel ${fullTableName}: ${errMsg}`);
+        }
+        finally {
+            if (conn) {
+                try {
+                    await conn.close();
+                }
+                catch (e) { }
+            }
+        }
+    }
     // ==================== SCHEMA COMPARE ENGINE ====================
     async compareSchemas(sourceConfig, sourceSchema, targetConfig, targetSchema) {
         let sourceConn = null;
@@ -1619,50 +1661,117 @@ class OracleService {
         let inString = false;
         let inLineComment = false;
         let inBlockComment = false;
-        for (let i = 0; i < text.length; i++) {
-            const char = text[i];
-            const next = text[i + 1];
-            if (!inString && !inLineComment && !inBlockComment) {
-                if (char === "'" && (i === 0 || text[i - 1] !== '\\')) {
-                    inString = true;
-                    current += char;
+        let isPlsql = false;
+        let plsqlDepth = 0;
+        const lines = text.split(/\r?\n/);
+        for (let lIdx = 0; lIdx < lines.length; lIdx++) {
+            const line = lines[lIdx];
+            const trimmedLine = line.trim();
+            // Check if line is just a slash '/' (SQL*Plus execution delimiter) outside comments/strings
+            if (!inString && !inBlockComment && trimmedLine === '/') {
+                if (current.trim()) {
+                    stmts.push(current.trim());
                 }
-                else if (char === '-' && next === '-') {
-                    inLineComment = true;
-                    current += char;
-                }
-                else if (char === '/' && next === '*') {
-                    inBlockComment = true;
-                    current += char;
-                }
-                else if (char === ';') {
-                    if (current.trim()) {
-                        stmts.push(current.trim());
+                current = '';
+                isPlsql = false;
+                plsqlDepth = 0;
+                continue;
+            }
+            for (let i = 0; i < line.length; i++) {
+                const char = line[i];
+                const next = line[i + 1];
+                if (!inString && !inLineComment && !inBlockComment) {
+                    if (char === "'" && (i === 0 || line[i - 1] !== '\\')) {
+                        inString = true;
+                        current += char;
                     }
-                    current = '';
+                    else if (char === '-' && next === '-') {
+                        inLineComment = true;
+                        current += char;
+                    }
+                    else if (char === '/' && next === '*') {
+                        inBlockComment = true;
+                        current += char;
+                    }
+                    else if (char === ';') {
+                        if (isPlsql) {
+                            current += char;
+                            // Check if this semicolon closes an END block
+                            const stripped = current.replace(/--[^\r\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '').trim();
+                            if (/\bEND(?!\s+(?:IF|LOOP))\b(?:\s+[A-Za-z0-9_$]+)?\s*;\s*$/i.test(stripped)) {
+                                if (plsqlDepth > 1) {
+                                    plsqlDepth--;
+                                }
+                                else {
+                                    stmts.push(current.trim());
+                                    current = '';
+                                    isPlsql = false;
+                                    plsqlDepth = 0;
+                                }
+                            }
+                        }
+                        else {
+                            if (current.trim()) {
+                                stmts.push(current.trim());
+                            }
+                            current = '';
+                            isPlsql = false;
+                            plsqlDepth = 0;
+                        }
+                    }
+                    else {
+                        current += char;
+                        // Check if current statement enters a PL/SQL construct or nested block
+                        if (!isPlsql) {
+                            const stripped = current.replace(/--[^\r\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '').trim();
+                            if (/^(DECLARE|BEGIN|CREATE\s+(?:OR\s+REPLACE\s+)?(?:PROCEDURE|FUNCTION|TRIGGER|PACKAGE|TYPE))\b/i.test(stripped)) {
+                                isPlsql = true;
+                                plsqlDepth = /^(BEGIN)\b/i.test(stripped) ? 1 : 0;
+                            }
+                        }
+                        else {
+                            const stripped = current.replace(/--[^\r\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '').trim();
+                            if (/\bBEGIN\b$/i.test(stripped) && !inString) {
+                                plsqlDepth++;
+                            }
+                        }
+                    }
                 }
-                else {
+                else if (inString) {
+                    current += char;
+                    if (char === "'") {
+                        if (next === "'") {
+                            // Escaped quote '' in SQL
+                            current += next;
+                            i++;
+                        }
+                        else if (i === 0 || line[i - 1] !== '\\') {
+                            inString = false;
+                        }
+                    }
+                }
+                else if (inLineComment) {
                     current += char;
                 }
-            }
-            else if (inString) {
-                current += char;
-                if (char === "'" && (i === 0 || text[i - 1] !== '\\')) {
-                    inString = false;
+                else if (inBlockComment) {
+                    current += char;
+                    if (char === '*' && next === '/') {
+                        current += next;
+                        i++;
+                        inBlockComment = false;
+                    }
                 }
             }
-            else if (inLineComment) {
-                current += char;
-                if (char === '\n') {
-                    inLineComment = false;
-                }
-            }
-            else if (inBlockComment) {
-                current += char;
-                if (char === '*' && next === '/') {
-                    current += next;
-                    i++;
-                    inBlockComment = false;
+            inLineComment = false;
+            current += '\n';
+            // If in PL/SQL and encountered terminating END; at the end of line
+            if (isPlsql) {
+                const stripped = current.replace(/--[^\r\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '').trim();
+                if (/\bEND(?!\s+(?:IF|LOOP))\b(?:\s+[A-Za-z0-9_$]+)?\s*;\s*$/i.test(stripped) && plsqlDepth <= 1) {
+                    stmts.push(current.trim());
+                    current = '';
+                    isPlsql = false;
+                    plsqlDepth = 0;
                 }
             }
         }
@@ -1723,6 +1832,12 @@ class OracleService {
         let conn = null;
         try {
             conn = await this.createConnection(config);
+            // Set session NLS date and timestamp formats to 24-hour clock so date/time functions work seamlessly
+            try {
+                await conn.execute(`ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD HH24:MI:SS'`);
+                await conn.execute(`ALTER SESSION SET NLS_TIMESTAMP_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF'`);
+            }
+            catch (nlsErr) { }
             // Determine effective schema and apply ALTER SESSION if needed
             let effectiveSchema = (targetSchema || '').trim().toUpperCase();
             let rawSql = sql;
@@ -1741,7 +1856,7 @@ class OracleService {
                     console.warn(`[OracleService] Could not switch session schema to ${effectiveSchema}:`, schemaErr?.message);
                 }
             }
-            // Split statements by semicolon while respecting string literals and comments
+            // Split statements by semicolon while respecting string literals, comments, and PL/SQL blocks
             const stmts = this.parseQueryStatements(rawSql);
             if (stmts.length === 0) {
                 return {
@@ -1755,20 +1870,43 @@ class OracleService {
             const statementResults = [];
             let totalAffectedRows = 0;
             for (const stmt of stmts) {
-                // Strip trailing semicolon or slash from individual statement
-                const cleanStmt = stmt.replace(/;+\s*$/, '').replace(/\/+\s*$/, '').trim();
+                let cleanStmt = stmt.trim();
                 if (!cleanStmt)
                     continue;
-                // Detect if this statement is a SELECT query by stripping leading comments first
+                // Strip leading comments to inspect statement type
                 const strippedForDetection = cleanStmt
                     .replace(/--[^\r\n]*/g, '')
                     .replace(/\/\*[\s\S]*?\*\//g, '')
                     .trim();
                 if (!strippedForDetection)
                     continue; // skip pure comment blocks
+                // Convert SQL*Plus EXEC / EXECUTE shorthand to PL/SQL block: EXEC my_proc(1); -> BEGIN my_proc(1); END;
+                if (/^EXEC(?:UTE)?\s+/i.test(strippedForDetection)) {
+                    const callBody = strippedForDetection.replace(/^EXEC(?:UTE)?\s+/i, '').replace(/;+\s*$/, '').trim();
+                    cleanStmt = `BEGIN ${callBody}; END;`;
+                }
+                // Detect if this statement is a PL/SQL construct
+                const isPlsql = /^(DECLARE|BEGIN|CREATE\s+(?:OR\s+REPLACE\s+)?(?:PROCEDURE|FUNCTION|TRIGGER|PACKAGE|TYPE))\b/i.test(cleanStmt.replace(/--[^\r\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '').trim());
+                if (isPlsql) {
+                    // Oracle PL/SQL blocks require a trailing semicolon
+                    cleanStmt = cleanStmt.replace(/\/+\s*$/, '').trim();
+                    if (!cleanStmt.endsWith(';'))
+                        cleanStmt += ';';
+                }
+                else {
+                    // Regular SQL (SELECT, INSERT, UPDATE, DDL) must NOT have trailing semicolon or slash in node-oracledb
+                    cleanStmt = cleanStmt.replace(/;+\s*$/, '').replace(/\/+\s*$/, '').trim();
+                }
                 const stmtStart = Date.now();
                 const title = this.extractStatementTitle(cleanStmt);
-                const isSelect = /^(SELECT|WITH)\s+/i.test(strippedForDetection);
+                const strippedClean = cleanStmt
+                    .replace(/--[^\r\n]*/g, '')
+                    .replace(/\/\*[\s\S]*?\*\//g, '')
+                    .trim();
+                // Support SELECT, WITH, or queries starting with parentheses e.g. (SELECT ...)
+                const isSelect = !isPlsql &&
+                    (/^(SELECT|WITH)\s+/i.test(strippedClean) ||
+                        (/^\(/i.test(strippedClean) && /\bSELECT\b/i.test(strippedClean)));
                 try {
                     if (isSelect) {
                         const result = await conn.execute(cleanStmt, [], {
@@ -1941,40 +2079,6 @@ class OracleService {
                 catch (e) { }
             }
             return { success: false, insertedCount: 0, error: err?.message || String(err) };
-        }
-        finally {
-            if (conn) {
-                try {
-                    await conn.close();
-                }
-                catch (e) { }
-            }
-        }
-    }
-    /**
-     * Drop / Delete table from Oracle Database
-     */
-    async dropTable(config, schema, tableName, purge = true) {
-        const startTime = Date.now();
-        let conn = null;
-        try {
-            conn = await this.createConnection(config);
-            const cleanSchema = (schema || config.schema || config.user || '').trim().toUpperCase();
-            const cleanTable = tableName.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '');
-            if (!cleanTable) {
-                throw new Error('Nama tabel tidak boleh kosong.');
-            }
-            const fullTable = cleanSchema ? `"${cleanSchema}"."${cleanTable}"` : `"${cleanTable}"`;
-            const sql = `DROP TABLE ${fullTable}${purge ? ' PURGE' : ''}`;
-            await conn.execute(sql);
-            return { success: true, executionTimeMs: Date.now() - startTime };
-        }
-        catch (err) {
-            return {
-                success: false,
-                error: err?.message || String(err),
-                executionTimeMs: Date.now() - startTime,
-            };
         }
         finally {
             if (conn) {

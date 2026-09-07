@@ -869,11 +869,11 @@ class TxtBundleService {
             if (options.createTableStrategy === 'drop_and_recreate') {
                 if (tableExists) {
                     try {
-                        await conn.execute(`DROP TABLE ${fullTableName} PURGE`);
+                        await conn.execute(`DROP TABLE ${fullTableName} CASCADE CONSTRAINTS PURGE`);
                         tableExists = false;
                     }
                     catch (e) {
-                        await conn.execute(`DROP TABLE ${fullTableName}`);
+                        await conn.execute(`DROP TABLE ${fullTableName} CASCADE CONSTRAINTS`);
                         tableExists = false;
                     }
                 }
