@@ -1,6 +1,6 @@
 {
   "name": "zeeniq-oracle-backup-tool",
-  "version": "1.2.27",
+  "version": "1.2.28",
   "main": "dist-electron/main.js",
   "dependencies": {
     "archiver": "^7.0.1",
