@@ -63,6 +63,11 @@ class OracleService {
                     await new Promise((resolve) => setTimeout(resolve, 1200));
                     continue;
                 }
+                if (msg.includes('NJS-530')) {
+                    const friendlyErr = new Error(`Host '${config.host}' tidak dapat dijangkau di jaringan Anda (NJS-530). Pastikan nama host/IP benar, VPN (Sangfor) aktif, atau gunakan IP langsung (misal: 10.161.10.135).`);
+                    friendlyErr.code = 'NJS-530';
+                    throw friendlyErr;
+                }
                 throw err;
             }
         }
