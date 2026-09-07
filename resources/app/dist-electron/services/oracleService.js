@@ -246,6 +246,67 @@ class OracleService {
             }
         }
     }
+    /**
+     * Mengambil metadata seluruh tabel dan kolom dalam satu schema untuk validasi katalog
+     */
+    async getSchemaTableColumns(config, schemaName) {
+        let conn = null;
+        try {
+            conn = await this.createConnection(config);
+            const owner = schemaName.toUpperCase();
+            const tableColsMap = {};
+            const sql = `
+        SELECT UPPER(table_name) AS table_name, UPPER(column_name) AS column_name
+        FROM all_tab_columns
+        WHERE UPPER(owner) = :owner
+        ORDER BY table_name ASC, column_id ASC
+      `;
+            try {
+                const result = await conn.execute(sql, { owner });
+                if (result.rows) {
+                    for (const r of result.rows) {
+                        const tbl = String(r[0]);
+                        const col = String(r[1]);
+                        if (!tableColsMap[tbl]) {
+                            tableColsMap[tbl] = [];
+                        }
+                        tableColsMap[tbl].push(col);
+                    }
+                }
+            }
+            catch (err) {
+                console.warn('all_tab_columns query failed, trying user_tab_cols fallback:', err);
+            }
+            // Fallback user_tab_cols if current user
+            if (Object.keys(tableColsMap).length === 0 && owner === config.user.toUpperCase()) {
+                try {
+                    const res = await conn.execute(`SELECT UPPER(table_name) AS table_name, UPPER(column_name) AS column_name
+             FROM user_tab_cols
+             ORDER BY table_name ASC, column_id ASC`);
+                    if (res.rows) {
+                        for (const r of res.rows) {
+                            const tbl = String(r[0]);
+                            const col = String(r[1]);
+                            if (!tableColsMap[tbl]) {
+                                tableColsMap[tbl] = [];
+                            }
+                            tableColsMap[tbl].push(col);
+                        }
+                    }
+                }
+                catch (e) { }
+            }
+            return tableColsMap;
+        }
+        finally {
+            if (conn) {
+                try {
+                    await conn.close();
+                }
+                catch (e) { }
+            }
+        }
+    }
     async getObjectDDL(config, schemaName, objectType, objectName) {
         let conn = null;
         try {

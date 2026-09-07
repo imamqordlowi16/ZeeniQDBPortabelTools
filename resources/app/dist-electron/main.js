@@ -146,6 +146,9 @@ electron_1.ipcMain.handle('oracle:get-schemas', async (_, config) => {
 electron_1.ipcMain.handle('oracle:get-schema-objects', async (_, config, schemaName) => {
     return await oracleService.getSchemaObjects(config, schemaName);
 });
+electron_1.ipcMain.handle('oracle:get-schema-table-columns', async (_, config, schemaName) => {
+    return await oracleService.getSchemaTableColumns(config, schemaName);
+});
 electron_1.ipcMain.handle('oracle:get-object-ddl', async (_, config, schemaName, objectType, objectName) => {
     return await oracleService.getObjectDDL(config, schemaName, objectType, objectName);
 });

@@ -6,6 +6,7 @@ const electronAPI = {
     testConnection: (config) => electron_1.ipcRenderer.invoke('oracle:test-connection', config),
     getSchemas: (config) => electron_1.ipcRenderer.invoke('oracle:get-schemas', config),
     getSchemaObjects: (config, schemaName) => electron_1.ipcRenderer.invoke('oracle:get-schema-objects', config, schemaName),
+    getSchemaTableColumns: (config, schemaName) => electron_1.ipcRenderer.invoke('oracle:get-schema-table-columns', config, schemaName),
     getObjectDDL: (config, schemaName, objectType, objectName) => electron_1.ipcRenderer.invoke('oracle:get-object-ddl', config, schemaName, objectType, objectName),
     getTableLiveRowCount: (config, schemaName, tableName) => electron_1.ipcRenderer.invoke('oracle:get-table-live-count', config, schemaName, tableName),
     executeQuery: (config, sql, maxRows) => electron_1.ipcRenderer.invoke('oracle:execute-query', config, sql, maxRows),
