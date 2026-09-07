@@ -158,8 +158,8 @@ electron_1.ipcMain.handle('oracle:get-table-live-count', async (_, config, schem
 electron_1.ipcMain.handle('oracle:detect-binaries', async (_, customPath) => {
     return datapumpService.detectOracleBinaries(customPath);
 });
-electron_1.ipcMain.handle('oracle:execute-query', async (_, config, sql, maxRows) => {
-    return await oracleService.executeQuery(config, sql, maxRows);
+electron_1.ipcMain.handle('oracle:execute-query', async (_, config, sql, maxRows, targetSchema) => {
+    return await oracleService.executeQuery(config, sql, maxRows, targetSchema);
 });
 electron_1.ipcMain.handle('oracle:import-data', async (_, config, options) => {
     return await oracleService.importDataBatch(config, options);

@@ -1608,80 +1608,180 @@ class OracleService {
         return buffer.toString('utf-8');
     }
     // ==================== QUERY & DATA WORKBENCH ====================
-    async executeQuery(config, sql, maxRows = 1000) {
+    parseQueryStatements(text) {
+        const stmts = [];
+        let current = '';
+        let inString = false;
+        let inLineComment = false;
+        let inBlockComment = false;
+        for (let i = 0; i < text.length; i++) {
+            const char = text[i];
+            const next = text[i + 1];
+            if (!inString && !inLineComment && !inBlockComment) {
+                if (char === "'" && (i === 0 || text[i - 1] !== '\\')) {
+                    inString = true;
+                    current += char;
+                }
+                else if (char === '-' && next === '-') {
+                    inLineComment = true;
+                    current += char;
+                }
+                else if (char === '/' && next === '*') {
+                    inBlockComment = true;
+                    current += char;
+                }
+                else if (char === ';') {
+                    if (current.trim()) {
+                        stmts.push(current.trim());
+                    }
+                    current = '';
+                }
+                else {
+                    current += char;
+                }
+            }
+            else if (inString) {
+                current += char;
+                if (char === "'" && (i === 0 || text[i - 1] !== '\\')) {
+                    inString = false;
+                }
+            }
+            else if (inLineComment) {
+                current += char;
+                if (char === '\n') {
+                    inLineComment = false;
+                }
+            }
+            else if (inBlockComment) {
+                current += char;
+                if (char === '*' && next === '/') {
+                    current += next;
+                    i++;
+                    inBlockComment = false;
+                }
+            }
+        }
+        if (current.trim()) {
+            stmts.push(current.trim());
+        }
+        return stmts;
+    }
+    async executeQuery(config, sql, maxRows = 1000, targetSchema) {
         const startTime = Date.now();
         let conn = null;
         try {
             conn = await this.createConnection(config);
-            const cleanSql = sql.trim().replace(/;+$/, '');
-            const isSelect = /^\s*(SELECT|WITH)\s+/i.test(cleanSql);
-            if (isSelect) {
-                const result = await conn.execute(cleanSql, [], {
-                    maxRows: maxRows,
-                    outFormat: oracledb_1.default.OUT_FORMAT_ARRAY,
-                });
-                const columnMeta = (result.metaData || []).map((m) => {
-                    let typeStr = m.dbTypeName || '';
-                    if (!typeStr && m.dbType) {
-                        typeStr = String(m.dbType);
-                    }
-                    if (typeStr === 'VARCHAR2' || typeStr === 'CHAR') {
-                        if (m.byteSize)
-                            typeStr += `(${m.byteSize})`;
-                    }
-                    else if (typeStr === 'NUMBER') {
-                        if (m.precision) {
-                            typeStr += m.scale ? `(${m.precision},${m.scale})` : `(${m.precision})`;
-                        }
-                    }
-                    return {
-                        name: m.name,
-                        dataType: typeStr || 'VARCHAR2',
-                        nullable: m.nullable,
-                        precision: m.precision,
-                        scale: m.scale,
-                        byteSize: m.byteSize,
-                    };
-                });
-                const columns = (result.metaData || []).map((m) => m.name);
-                const rows = (result.rows || []).map((row) => row.map((val, colIdx) => {
-                    if (val === null || val === undefined)
-                        return null;
-                    if (val instanceof Date)
-                        return val.toISOString();
-                    if (Buffer.isBuffer(val)) {
-                        const meta = columnMeta[colIdx];
-                        const isRawType = meta?.dataType?.toUpperCase().includes('RAW');
-                        // Convert RAW columns or 16-byte Buffer (Oracle SYS_GUID / UUID) to HEX string
-                        if (isRawType || val.length === 16) {
-                            return val.toString('hex').toUpperCase();
-                        }
-                        return `[BLOB ${val.length} bytes]`;
-                    }
-                    return String(val);
-                }));
-                const executionTimeMs = Date.now() - startTime;
-                return {
-                    success: true,
-                    columns,
-                    columnMeta,
-                    rows,
-                    rowCount: rows.length,
-                    executionTimeMs,
-                };
+            // Determine effective schema and apply ALTER SESSION if needed
+            let effectiveSchema = (targetSchema || '').trim().toUpperCase();
+            let rawSql = sql;
+            // Check for inline ALTER SESSION statement in SQL text and extract it
+            const alterMatch = rawSql.match(/ALTER\s+SESSION\s+SET\s+CURRENT_SCHEMA\s*=\s*["']?([A-Za-z0-9_]+)["']?\s*;?/i);
+            if (alterMatch) {
+                effectiveSchema = alterMatch[1].toUpperCase();
+                // Remove ALTER SESSION line from sql text so it doesn't break statement execution
+                rawSql = rawSql.replace(/ALTER\s+SESSION\s+SET\s+CURRENT_SCHEMA\s*=\s*["']?[A-Za-z0-9_]+["']?\s*;?\s*/gi, '');
             }
-            else {
-                const result = await conn.execute(cleanSql, [], { autoCommit: true });
-                const executionTimeMs = Date.now() - startTime;
+            if (effectiveSchema && effectiveSchema !== (config.user || '').toUpperCase()) {
+                try {
+                    await conn.execute(`ALTER SESSION SET CURRENT_SCHEMA = "${effectiveSchema}"`);
+                }
+                catch (schemaErr) {
+                    console.warn(`[OracleService] Could not switch session schema to ${effectiveSchema}:`, schemaErr?.message);
+                }
+            }
+            // Split statements by semicolon while respecting string literals and comments
+            const stmts = this.parseQueryStatements(rawSql);
+            if (stmts.length === 0) {
                 return {
                     success: true,
                     columns: [],
                     rows: [],
                     rowCount: 0,
-                    affectedRows: result.rowsAffected ?? 0,
-                    executionTimeMs,
+                    executionTimeMs: Date.now() - startTime,
                 };
             }
+            let lastQueryResult = null;
+            let totalAffectedRows = 0;
+            for (const stmt of stmts) {
+                // Strip trailing semicolon or slash from individual statement
+                const cleanStmt = stmt.replace(/;+\s*$/, '').replace(/\/+\s*$/, '').trim();
+                if (!cleanStmt)
+                    continue;
+                // Detect if this statement is a SELECT query by stripping leading comments first
+                const strippedForDetection = cleanStmt
+                    .replace(/--[^\r\n]*/g, '')
+                    .replace(/\/\*[\s\S]*?\*\//g, '')
+                    .trim();
+                const isSelect = /^(SELECT|WITH)\s+/i.test(strippedForDetection);
+                if (isSelect) {
+                    const result = await conn.execute(cleanStmt, [], {
+                        maxRows: maxRows,
+                        outFormat: oracledb_1.default.OUT_FORMAT_ARRAY,
+                    });
+                    const columnMeta = (result.metaData || []).map((m) => {
+                        let typeStr = m.dbTypeName || '';
+                        if (!typeStr && m.dbType) {
+                            typeStr = String(m.dbType);
+                        }
+                        if (typeStr === 'VARCHAR2' || typeStr === 'CHAR') {
+                            if (m.byteSize)
+                                typeStr += `(${m.byteSize})`;
+                        }
+                        else if (typeStr === 'NUMBER') {
+                            if (m.precision) {
+                                typeStr += m.scale ? `(${m.precision},${m.scale})` : `(${m.precision})`;
+                            }
+                        }
+                        return {
+                            name: m.name,
+                            dataType: typeStr || 'VARCHAR2',
+                            nullable: m.nullable,
+                            precision: m.precision,
+                            scale: m.scale,
+                            byteSize: m.byteSize,
+                        };
+                    });
+                    const columns = (result.metaData || []).map((m) => m.name);
+                    const rows = (result.rows || []).map((row) => row.map((val, colIdx) => {
+                        if (val === null || val === undefined)
+                            return null;
+                        if (val instanceof Date)
+                            return val.toISOString();
+                        if (Buffer.isBuffer(val)) {
+                            const meta = columnMeta[colIdx];
+                            const isRawType = meta?.dataType?.toUpperCase().includes('RAW');
+                            if (isRawType || val.length === 16) {
+                                return val.toString('hex').toUpperCase();
+                            }
+                            return `[BLOB ${val.length} bytes]`;
+                        }
+                        return String(val);
+                    }));
+                    lastQueryResult = {
+                        success: true,
+                        columns,
+                        columnMeta,
+                        rows,
+                        rowCount: rows.length,
+                        executionTimeMs: Date.now() - startTime,
+                    };
+                }
+                else {
+                    const result = await conn.execute(cleanStmt, [], { autoCommit: true });
+                    totalAffectedRows += result.rowsAffected ?? 0;
+                }
+            }
+            if (lastQueryResult) {
+                return lastQueryResult;
+            }
+            return {
+                success: true,
+                columns: [],
+                rows: [],
+                rowCount: 0,
+                affectedRows: totalAffectedRows,
+                executionTimeMs: Date.now() - startTime,
+            };
         }
         catch (err) {
             return {
