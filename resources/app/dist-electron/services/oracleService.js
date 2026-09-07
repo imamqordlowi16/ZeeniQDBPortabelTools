@@ -1583,13 +1583,20 @@ class OracleService {
                     };
                 });
                 const columns = (result.metaData || []).map((m) => m.name);
-                const rows = (result.rows || []).map((row) => row.map((val) => {
+                const rows = (result.rows || []).map((row) => row.map((val, colIdx) => {
                     if (val === null || val === undefined)
                         return null;
                     if (val instanceof Date)
                         return val.toISOString();
-                    if (Buffer.isBuffer(val))
+                    if (Buffer.isBuffer(val)) {
+                        const meta = columnMeta[colIdx];
+                        const isRawType = meta?.dataType?.toUpperCase().includes('RAW');
+                        // Convert RAW columns or 16-byte Buffer (Oracle SYS_GUID / UUID) to HEX string
+                        if (isRawType || val.length === 16) {
+                            return val.toString('hex').toUpperCase();
+                        }
                         return `[BLOB ${val.length} bytes]`;
+                    }
                     return String(val);
                 }));
                 const executionTimeMs = Date.now() - startTime;
