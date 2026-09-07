@@ -10,6 +10,8 @@ const os_1 = __importDefault(require("os"));
 const crypto_1 = __importDefault(require("crypto"));
 const child_process_1 = require("child_process");
 const electron_1 = require("electron");
+const https_1 = __importDefault(require("https"));
+const unzipper_1 = __importDefault(require("unzipper"));
 const appVersionService_1 = require("./appVersionService");
 class UpdateService {
     static BRANCH = 'main';
@@ -27,27 +29,60 @@ class UpdateService {
     static getSourceRoot() {
         return process.cwd();
     }
+    static async hasGit() {
+        return new Promise((resolve) => {
+            (0, child_process_1.execFile)('git', ['--version'], (err) => {
+                resolve(!err);
+            });
+        });
+    }
+    static compareVersions(v1, v2) {
+        if (!v1 || !v2)
+            return 0;
+        const p1 = v1.trim().replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+        const p2 = v2.trim().replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+        while (p1.length < 3)
+            p1.push(0);
+        while (p2.length < 3)
+            p2.push(0);
+        for (let i = 0; i < 3; i++) {
+            if (p1[i] > p2[i])
+                return 1;
+            if (p1[i] < p2[i])
+                return -1;
+        }
+        return 0;
+    }
+    static parseGitHubRemote(remote) {
+        const match = (remote || '').match(/github\.com[/:]([^/]+)\/([^/\.]+)(?:\.git)?/i);
+        if (match) {
+            return { owner: match[1], repo: match[2] };
+        }
+        return null;
+    }
+    static async fetchHttpsText(url, headers = {}) {
+        return new Promise((resolve, reject) => {
+            const agent = new https_1.default.Agent({ rejectUnauthorized: false });
+            const req = https_1.default.get(url, { agent, headers: { 'User-Agent': 'ZeenIQ-Oracle-Tools', ...headers } }, (res) => {
+                if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                    return this.fetchHttpsText(res.headers.location, headers).then(resolve).catch(reject);
+                }
+                if (res.statusCode !== 200) {
+                    return reject(new Error(`HTTP ${res.statusCode} from ${url}`));
+                }
+                let data = '';
+                res.setEncoding('utf8');
+                res.on('data', (chunk) => (data += chunk));
+                res.on('end', () => resolve(data.trim()));
+            });
+            req.on('error', reject);
+            req.setTimeout(12000, () => {
+                req.destroy(new Error('Timeout fetching ' + url));
+            });
+        });
+    }
     static async checkForUpdate(appFolder, remote) {
         const currentVersion = appVersionService_1.AppVersionService.getCurrentVersion();
-        const gitDir = path_1.default.join(appFolder, '.git');
-        if (!fs_1.default.existsSync(gitDir)) {
-            try {
-                await this.runGit(appFolder, ['init', '-b', this.BRANCH]);
-                const gitignore = path_1.default.join(appFolder, '.gitignore');
-                if (!fs_1.default.existsSync(gitignore)) {
-                    fs_1.default.writeFileSync(gitignore, 'zeeniq_oracle_data/\nData/\nlogs/\n*.log\ntemp/\nstorage/\napp-runtime.log\nnode_modules/\n', 'utf8');
-                }
-                await this.runGit(appFolder, ['remote', 'add', 'origin', remote]);
-            }
-            catch (e) {
-                return {
-                    available: false,
-                    commitsBehind: 0,
-                    currentVersion,
-                    error: `Folder belum menjadi git repo: ${e?.message || e}`,
-                };
-            }
-        }
         if (!remote || !remote.trim()) {
             return {
                 available: false,
@@ -56,23 +91,121 @@ class UpdateService {
                 error: 'Path remote git / share belum dikonfigurasi.',
             };
         }
-        // Pastikan remote origin sesuai
-        try {
-            const getUrlRes = await this.runGit(appFolder, ['remote', 'get-url', 'origin']);
-            if (getUrlRes.exitCode === 0) {
-                if (getUrlRes.stdout.trim() !== remote.trim()) {
-                    await this.runGit(appFolder, ['remote', 'set-url', 'origin', remote]);
+        const trimmedRemote = remote.trim();
+        const gitAvailable = await this.hasGit();
+        const gitDir = path_1.default.join(appFolder, '.git');
+        const ghInfo = this.parseGitHubRemote(trimmedRemote);
+        // Kasus 1: Remote adalah folder lokal atau network share (UNC path / drive letter)
+        if (fs_1.default.existsSync(trimmedRemote) && !ghInfo) {
+            const shareVerFile = path_1.default.join(trimmedRemote, 'version.txt');
+            if (fs_1.default.existsSync(shareVerFile)) {
+                try {
+                    const remoteVer = fs_1.default.readFileSync(shareVerFile, 'utf8').trim();
+                    const isNewer = this.compareVersions(remoteVer, currentVersion) > 0;
+                    return {
+                        available: isNewer,
+                        commitsBehind: isNewer ? 1 : 0,
+                        currentVersion,
+                        remoteVersion: remoteVer,
+                        changelog: isNewer ? [`Pembaruan v${remoteVer} tersedia di network share`] : [],
+                        error: null,
+                    };
+                }
+                catch (e) {
+                    return {
+                        available: false,
+                        commitsBehind: 0,
+                        currentVersion,
+                        error: `Gagal membaca version.txt dari share: ${e?.message || e}`,
+                    };
+                }
+            }
+        }
+        // Kasus 2: Laptop tidak memiliki Git ATAU folder aplikasi bukan repo git (misal hasil instalasi installer)
+        if (!gitAvailable || !fs_1.default.existsSync(gitDir)) {
+            if (ghInfo) {
+                try {
+                    // Ambil version.txt langsung via HTTPS (Git-Free)
+                    const rawUrl = `https://raw.githubusercontent.com/${ghInfo.owner}/${ghInfo.repo}/main/version.txt`;
+                    const remoteVer = await this.fetchHttpsText(rawUrl);
+                    const isNewer = this.compareVersions(remoteVer, currentVersion) > 0;
+                    // Ambil commit messages terbaru via GitHub API
+                    let changelog = [];
+                    try {
+                        const commitsApiUrl = `https://api.github.com/repos/${ghInfo.owner}/${ghInfo.repo}/commits?per_page=5`;
+                        const commitsJson = await this.fetchHttpsText(commitsApiUrl);
+                        const commits = JSON.parse(commitsJson);
+                        if (Array.isArray(commits)) {
+                            changelog = commits.map((c) => {
+                                const sha = (c.sha || '').substring(0, 7);
+                                const msg = (c.commit?.message || '').split('\n')[0];
+                                return `${sha} - ${msg}`;
+                            });
+                        }
+                    }
+                    catch (e) { }
+                    return {
+                        available: isNewer,
+                        commitsBehind: isNewer ? Math.max(changelog.length, 1) : 0,
+                        currentVersion,
+                        remoteVersion: remoteVer,
+                        changelog,
+                        error: null,
+                    };
+                }
+                catch (e) {
+                    return {
+                        available: false,
+                        commitsBehind: 0,
+                        currentVersion,
+                        error: `Gagal memeriksa pembaruan via HTTPS: ${e?.message || e}`,
+                    };
                 }
             }
             else {
-                await this.runGit(appFolder, ['remote', 'add', 'origin', remote]);
+                return {
+                    available: false,
+                    commitsBehind: 0,
+                    currentVersion,
+                    error: 'Git tidak terpasang dan remote bukan repositori GitHub yang valid.',
+                };
+            }
+        }
+        // Kasus 3: Git terpasang dan folder aplikasi adalah git repo
+        try {
+            // Pastikan remote origin sesuai
+            const getUrlRes = await this.runGit(appFolder, ['remote', 'get-url', 'origin']);
+            if (getUrlRes.exitCode === 0) {
+                if (getUrlRes.stdout.trim() !== trimmedRemote) {
+                    await this.runGit(appFolder, ['remote', 'set-url', 'origin', trimmedRemote]);
+                }
+            }
+            else {
+                await this.runGit(appFolder, ['remote', 'add', 'origin', trimmedRemote]);
             }
         }
         catch (e) { }
-        // Fetch langsung dari remote git repository portable
-        const fetchRes = await this.runGit(appFolder, ['fetch', remote, this.BRANCH]);
+        // Fetch dari remote git
+        const fetchRes = await this.runGit(appFolder, ['fetch', trimmedRemote, this.BRANCH]);
         if (fetchRes.exitCode !== 0) {
-            const sanitizedErr = this.redactRemote(this.firstLine(fetchRes.stderr || fetchRes.stdout), remote);
+            // Jika git fetch gagal, coba fallback ke Git-Free HTTPS jika remote GitHub
+            if (ghInfo) {
+                try {
+                    const rawUrl = `https://raw.githubusercontent.com/${ghInfo.owner}/${ghInfo.repo}/main/version.txt`;
+                    const remoteVer = await this.fetchHttpsText(rawUrl);
+                    const isNewer = this.compareVersions(remoteVer, currentVersion) > 0;
+                    return {
+                        available: isNewer,
+                        commitsBehind: isNewer ? 1 : 0,
+                        currentVersion,
+                        remoteVersion: remoteVer,
+                        changelog: isNewer ? [`Pembaruan v${remoteVer} tersedia via HTTPS`] : [],
+                        error: null,
+                    };
+                }
+                catch (e) { }
+            }
+            const sanitizedErr = this.redactRemote(this.firstLine(fetchRes.stderr || fetchRes.stdout), trimmedRemote);
             return {
                 available: false,
                 commitsBehind: 0,
@@ -80,18 +213,10 @@ class UpdateService {
                 error: `git fetch gagal: ${sanitizedErr}`,
             };
         }
-        // Hitung jumlah commit yang tertinggal terhadap remote git portable
+        // Hitung jumlah commit yang tertinggal
         const countRes = await this.runGit(appFolder, ['rev-list', '--count', 'HEAD..FETCH_HEAD']);
-        if (countRes.exitCode !== 0) {
-            return {
-                available: false,
-                commitsBehind: 0,
-                currentVersion,
-                error: `git rev-list gagal: ${this.firstLine(countRes.stderr || countRes.stdout)}`,
-            };
-        }
-        const commitsBehind = parseInt(countRes.stdout.trim(), 10) || 0;
-        // Baca version.txt / resources/app/version.txt dari FETCH_HEAD remote Git
+        const commitsBehind = countRes.exitCode === 0 ? parseInt(countRes.stdout.trim(), 10) || 0 : 0;
+        // Baca version.txt dari FETCH_HEAD
         let remoteVersion;
         try {
             const showRes = await this.runGit(appFolder, ['show', 'FETCH_HEAD:version.txt']);
@@ -106,7 +231,7 @@ class UpdateService {
             }
         }
         catch (e) { }
-        // Dapatkan log commit baru dari remote Git portable
+        // Changelog
         let changelog = [];
         try {
             const logRes = await this.runGit(appFolder, ['log', 'HEAD..FETCH_HEAD', '--pretty=format:%h - %s', '-n', '8']);
@@ -116,8 +241,8 @@ class UpdateService {
         }
         catch (e) { }
         return {
-            available: commitsBehind > 0,
-            commitsBehind,
+            available: commitsBehind > 0 || (remoteVersion ? this.compareVersions(remoteVersion, currentVersion) > 0 : false),
+            commitsBehind: Math.max(commitsBehind, remoteVersion && this.compareVersions(remoteVersion, currentVersion) > 0 ? 1 : 0),
             currentVersion,
             remoteVersion,
             changelog,
@@ -185,6 +310,119 @@ class UpdateService {
         await this.runGitChecked(sourceRoot, onLog, ['push', '-u', 'origin', this.BRANCH]);
         onLog(`Source code berhasil di-push ke ${remote}.`);
     }
+    static async downloadFile(url, destFile, onProgress) {
+        return new Promise((resolve, reject) => {
+            const agent = new https_1.default.Agent({ rejectUnauthorized: false });
+            const req = https_1.default.get(url, { agent, headers: { 'User-Agent': 'ZeenIQ-Oracle-Tools' } }, (res) => {
+                if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                    return this.downloadFile(res.headers.location, destFile, onProgress).then(resolve).catch(reject);
+                }
+                if (res.statusCode !== 200) {
+                    return reject(new Error(`Gagal mengunduh file: HTTP ${res.statusCode}`));
+                }
+                const totalBytes = parseInt(res.headers['content-length'] || '0', 10);
+                let downloaded = 0;
+                let lastReport = 0;
+                const fileStream = fs_1.default.createWriteStream(destFile);
+                res.on('data', (chunk) => {
+                    downloaded += chunk.length;
+                    const now = Date.now();
+                    if (now - lastReport > 400 || downloaded === totalBytes) {
+                        lastReport = now;
+                        if (totalBytes > 0) {
+                            const pct = Math.round((downloaded / totalBytes) * 100);
+                            onProgress?.(`Mengunduh pembaruan: ${pct}% (${(downloaded / 1024 / 1024).toFixed(1)} / ${(totalBytes / 1024 / 1024).toFixed(1)} MB)...`);
+                        }
+                        else {
+                            onProgress?.(`Mengunduh pembaruan: ${(downloaded / 1024 / 1024).toFixed(1)} MB...`);
+                        }
+                    }
+                });
+                res.pipe(fileStream);
+                fileStream.on('finish', () => {
+                    fileStream.close();
+                    resolve();
+                });
+                fileStream.on('error', (err) => {
+                    try {
+                        fs_1.default.unlinkSync(destFile);
+                    }
+                    catch (e) { }
+                    reject(err);
+                });
+            });
+            req.on('error', (err) => {
+                try {
+                    fs_1.default.unlinkSync(destFile);
+                }
+                catch (e) { }
+                reject(err);
+            });
+            req.setTimeout(120000, () => {
+                req.destroy(new Error('Timeout mengunduh update (>120 detik)'));
+            });
+        });
+    }
+    static async downloadAndExtractZip(zipUrl, targetDir, onProgress) {
+        const tempZipPath = path_1.default.join(os_1.default.tmpdir(), `zeeniq_update_${crypto_1.default.randomBytes(4).toString('hex')}.zip`);
+        const extractDir = path_1.default.join(targetDir, 'extracted');
+        fs_1.default.mkdirSync(extractDir, { recursive: true });
+        onProgress?.('Menghubungi server unduhan...');
+        await this.downloadFile(zipUrl, tempZipPath, onProgress);
+        onProgress?.('Mengekstrak paket pembaruan...');
+        await new Promise((resolve, reject) => {
+            fs_1.default.createReadStream(tempZipPath)
+                .pipe(unzipper_1.default.Extract({ path: extractDir }))
+                .on('close', resolve)
+                .on('error', reject);
+        });
+        try {
+            fs_1.default.unlinkSync(tempZipPath);
+        }
+        catch (e) { }
+        // Temukan folder utama di dalam hasil ekstraksi (misal ZeeniQDBPortabelTools-main)
+        const entries = fs_1.default.readdirSync(extractDir);
+        for (const entry of entries) {
+            const full = path_1.default.join(extractDir, entry);
+            if (fs_1.default.statSync(full).isDirectory()) {
+                return full;
+            }
+        }
+        return extractDir;
+    }
+    static async prepareAndLaunchUpdater(remote, appFolder, onLog) {
+        const trimmedRemote = (remote || '').trim();
+        const gitAvailable = await this.hasGit();
+        const gitDir = path_1.default.join(appFolder, '.git');
+        const ghInfo = this.parseGitHubRemote(trimmedRemote);
+        // Kasus A: Remote adalah direktori lokal / network share UNC
+        if (fs_1.default.existsSync(trimmedRemote) && !ghInfo) {
+            onLog?.(`Menggunakan staging pembaruan dari share lokal: ${trimmedRemote}`);
+            this.launchUpdaterAndExit(trimmedRemote, appFolder);
+            return;
+        }
+        // Kasus B: Laptop TIDAK memiliki Git ATAU folder aplikasi bukan repo git (misal hasil instalasi installer)
+        if (!gitAvailable || !fs_1.default.existsSync(gitDir)) {
+            if (ghInfo) {
+                onLog?.('Git tidak terdeteksi di laptop ini. Memulai pengunduhan otomatis via HTTPS...');
+                const zipUrl = `https://codeload.github.com/${ghInfo.owner}/${ghInfo.repo}/zip/refs/heads/main`;
+                const tempBase = path_1.default.join(os_1.default.tmpdir(), `zeeniq_staging_${crypto_1.default.randomBytes(4).toString('hex')}`);
+                fs_1.default.mkdirSync(tempBase, { recursive: true });
+                try {
+                    const stagingFolder = await this.downloadAndExtractZip(zipUrl, tempBase, onLog);
+                    onLog?.('Pembaruan berhasil diekstrak ke staging lokal. Menjalankan updater mandiri...');
+                    // Jalankan updater dalam Mode A (Staging robocopy) - 100% tanpa Git!
+                    this.launchUpdaterAndExit(stagingFolder, appFolder);
+                    return;
+                }
+                catch (err) {
+                    onLog?.(`Peringatan: Unduhan langsung gagal (${err.message}). Mencoba updater internal...`);
+                }
+            }
+        }
+        // Kasus C: Git tersedia dan aplikasi adalah git repo, atau fallback
+        this.launchUpdaterAndExit(trimmedRemote, appFolder);
+    }
     static launchUpdaterAndExit(remote, appFolder) {
         const pid = process.pid.toString();
         const tempDir = os_1.default.tmpdir();
@@ -219,6 +457,33 @@ class UpdateService {
             // Fallback: buat script updater batch mandiri di %TEMP%
             const fallbackBat = path_1.default.join(tempDir, `ZeenIQDbTools.Updater_${guid}.bat`);
             const exeName = 'ZeenIQ-Oracle-Tools.exe';
+            const isDir = fs_1.default.existsSync(remote);
+            let updateCommands = '';
+            if (isDir) {
+                // Mode A Staging: robocopy
+                updateCommands = `
+robocopy "${remote}" "%DEST%" /E /XD zeeniq_oracle_data Data logs temp /NFL /NDL >nul
+`;
+            }
+            else {
+                // Mode B: Git atau PowerShell fallback jika git tidak ada
+                updateCommands = `
+where git >nul 2>nul
+if %errorlevel% neq 0 (
+  echo Git tidak ditemukan. Mengunduh pembaruan via PowerShell...
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}; $zip = Join-Path $env:TEMP 'zeeniq_up.zip'; $dir = Join-Path $env:TEMP 'zeeniq_up'; Remove-Item -Force -Recurse $dir -ErrorAction SilentlyContinue; Invoke-WebRequest -Uri 'https://codeload.github.com/imamqordlowi16/ZeeniQDBPortabelTools/zip/refs/heads/main' -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $dir -Force; $src = (Get-ChildItem -Path $dir | Select-Object -First 1).FullName; robocopy $src '%DEST%' /E /XD zeeniq_oracle_data Data logs temp /NFL /NDL; Remove-Item -Force $zip; Remove-Item -Force -Recurse $dir;"
+) else (
+  cd /d "%DEST%"
+  if not exist ".git" (
+    git init -b main
+    git remote add origin "%REMOTE%"
+  )
+  git fetch origin main
+  git reset --hard origin/main
+  git clean -fd
+)
+`;
+            }
             const batContent = `@echo off
 setlocal
 set PID=${pid}
@@ -228,15 +493,7 @@ set DEST=${appFolder}
 :: Tunggu proses utama keluar
 timeout /t 2 /nobreak >nul
 
-cd /d "%DEST%"
-if not exist ".git" (
-  git init -b main
-  git remote add origin "%REMOTE%"
-)
-
-git fetch origin main
-git reset --hard origin/main
-git clean -fd
+${updateCommands}
 
 if exist "%DEST%\\${exeName}" (
   start "" "%DEST%\\${exeName}"

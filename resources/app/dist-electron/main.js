@@ -538,7 +538,15 @@ electron_1.ipcMain.handle('update:apply', async (_, customRemote) => {
         'https://github.com/imamqordlowi16/ZeeniQDBPortabelTools.git';
     const appFolder = updateService_1.UpdateService.getAppFolder();
     sendUpdateLog('info', `Mempersiapkan proses instalasi update ke ${appFolder}...`);
-    updateService_1.UpdateService.launchUpdaterAndExit(remote, appFolder);
+    try {
+        await updateService_1.UpdateService.prepareAndLaunchUpdater(remote, appFolder, (msg) => {
+            sendUpdateLog('info', msg);
+        });
+    }
+    catch (e) {
+        sendUpdateLog('error', `Gagal mempersiapkan update: ${e.message}`);
+        updateService_1.UpdateService.launchUpdaterAndExit(remote, appFolder);
+    }
 });
 electron_1.ipcMain.handle('update:publish', async (_, remote, newVersion) => {
     if (newVersion && newVersion.trim()) {
