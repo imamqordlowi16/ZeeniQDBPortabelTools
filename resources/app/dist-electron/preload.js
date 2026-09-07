@@ -11,6 +11,7 @@ const electronAPI = {
     getTableLiveRowCount: (config, schemaName, tableName) => electron_1.ipcRenderer.invoke('oracle:get-table-live-count', config, schemaName, tableName),
     executeQuery: (config, sql, maxRows, targetSchema) => electron_1.ipcRenderer.invoke('oracle:execute-query', config, sql, maxRows, targetSchema),
     importData: (config, options) => electron_1.ipcRenderer.invoke('oracle:import-data', config, options),
+    dropTable: (config, schema, tableName, purge) => electron_1.ipcRenderer.invoke('oracle:drop-table', config, schema, tableName, purge),
     callAiProvider: (params) => electron_1.ipcRenderer.invoke('ai:call-provider', params),
     // TXT Bundle & Bloomberg Data License Importer
     analyzeTxtBundle: (sourcePathOrFiles) => electron_1.ipcRenderer.invoke('txt-bundle:analyze', sourcePathOrFiles),

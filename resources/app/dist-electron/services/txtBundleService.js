@@ -468,18 +468,19 @@ class TxtBundleService {
         }
     }
     /**
-     * Flexible Date Parser for Oracle batch insertion
+     * Flexible Date & Timestamp Parser for Oracle batch insertion
      */
     parseFlexDate(val) {
         if (val === null || val === undefined)
             return null;
         if (val instanceof Date)
-            return val;
+            return isNaN(val.getTime()) ? null : val;
         const sVal = String(val).trim();
         if (!sVal)
             return null;
-        // DD-MON-YY or DD-MON-YYYY (e.g. 06-AUG-24, 06-AUG-2024, 06-AGU-24, 15-PEB-2023)
-        const monMatch = sVal.match(/^(\d{1,2})[-/ ]([A-Za-z]{3})[-/ ](\d{2,4})$/);
+        // 1. DD-MON-YY or DD-MON-YYYY with optional time, fractional seconds, and AM/PM
+        // e.g. 14-MAR-25 21.10.31.000000000, 02-JAN-25 10.15.19.000000000, 06-AUG-24, 15-PEB-2023 10:15:00
+        const monMatch = sVal.match(/^(\d{1,2})[-/ ]([A-Za-z]{3})[-/ ](\d{2,4})(?:[\sT]+(\d{1,2})[.:](\d{1,2})(?:[.:](\d{1,2}))?(?:[.](\d+))?(?:\s*([AP]M))?)?$/i);
         if (monMatch) {
             const day = parseInt(monMatch[1], 10);
             const monStr = monMatch[2].toLowerCase();
@@ -508,25 +509,45 @@ class TxtBundleService {
                 des: 11,
             };
             if (months[monStr] !== undefined) {
-                return new Date(year, months[monStr], day);
+                let hr = monMatch[4] ? parseInt(monMatch[4], 10) : 0;
+                const min = monMatch[5] ? parseInt(monMatch[5], 10) : 0;
+                const sec = monMatch[6] ? parseInt(monMatch[6], 10) : 0;
+                const ms = monMatch[7] ? parseInt(monMatch[7].slice(0, 3).padEnd(3, '0'), 10) : 0;
+                const ampm = monMatch[8]?.toUpperCase();
+                if (ampm === 'PM' && hr < 12)
+                    hr += 12;
+                if (ampm === 'AM' && hr === 12)
+                    hr = 0;
+                return new Date(year, months[monStr], day, hr, min, sec, ms);
             }
         }
-        // YYYY-MM-DD or YYYY-MM-DD HH:mm:ss
-        if (/^\d{4}-\d{2}-\d{2}/.test(sVal)) {
-            const parts = sVal.split(/[- :]/).map(Number);
-            return new Date(parts[0], parts[1] - 1, parts[2], parts[3] || 0, parts[4] || 0, parts[5] || 0);
+        // 2. YYYY-MM-DD or YYYY/MM/DD with optional time and fractional seconds
+        if (/^\d{4}[\/\-]\d{2}[\/\-]\d{2}/.test(sVal)) {
+            const parts = sVal.split(/[- \/:.T]/).map(Number);
+            return new Date(parts[0], parts[1] - 1, parts[2], parts[3] || 0, parts[4] || 0, parts[5] || 0, parts[6] ? parseInt(String(parts[6]).slice(0, 3).padEnd(3, '0'), 10) : 0);
         }
-        // YYYYMMDD
+        // 3. YYYYMMDD
         if (/^\d{8}$/.test(sVal)) {
             const y = parseInt(sVal.slice(0, 4), 10);
             const m = parseInt(sVal.slice(4, 6), 10);
             const d = parseInt(sVal.slice(6, 8), 10);
             return new Date(y, m - 1, d);
         }
-        // DD/MM/YYYY or DD-MM-YYYY
-        if (/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4}$/.test(sVal)) {
-            const [d, m, y] = sVal.split(/[\/\-]/).map(Number);
-            return new Date(y, m - 1, d);
+        // 4. DD/MM/YYYY or DD-MM-YYYY with optional time
+        const dmyMatch = sVal.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})(?:[\sT]+(\d{1,2})[.:](\d{1,2})(?:[.:](\d{1,2}))?(?:\s*([AP]M))?)?$/i);
+        if (dmyMatch) {
+            const d = parseInt(dmyMatch[1], 10);
+            const m = parseInt(dmyMatch[2], 10);
+            const y = parseInt(dmyMatch[3], 10);
+            let hr = dmyMatch[4] ? parseInt(dmyMatch[4], 10) : 0;
+            const min = dmyMatch[5] ? parseInt(dmyMatch[5], 10) : 0;
+            const sec = dmyMatch[6] ? parseInt(dmyMatch[6], 10) : 0;
+            const ampm = dmyMatch[7]?.toUpperCase();
+            if (ampm === 'PM' && hr < 12)
+                hr += 12;
+            if (ampm === 'AM' && hr === 12)
+                hr = 0;
+            return new Date(y, m - 1, d, hr, min, sec);
         }
         return null;
     }
@@ -822,6 +843,15 @@ class TxtBundleService {
             }
             // 2. Connect to Oracle
             conn = await this.oracleService.createConnection(config);
+            // Configure session NLS date and timestamp formats to 24-hour clock to prevent ORA-01849
+            try {
+                await conn.execute(`ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD HH24:MI:SS'`);
+                await conn.execute(`ALTER SESSION SET NLS_TIMESTAMP_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF'`);
+                await conn.execute(`ALTER SESSION SET NLS_TIMESTAMP_TZ_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF TZR'`);
+            }
+            catch (nlsErr) {
+                console.warn('Gagal mengatur session NLS date/timestamp format:', nlsErr);
+            }
             const schema = (options.schema || config.schema || config.user).toUpperCase();
             const tableName = options.tableName.toUpperCase().replace(/[^A-Z0-9_]/g, '');
             const fullTableName = `"${schema}"."${tableName}"`;
@@ -1057,21 +1087,10 @@ class TxtBundleService {
                         const num = parseFloat(String(val).replace(/,/g, ''));
                         return !isNaN(num) && isFinite(Number(num)) ? num : null;
                     }
-                    // Convert Date if column type is DATE
-                    if (col.type && col.type.toUpperCase().startsWith('DATE')) {
-                        if (val instanceof Date)
-                            return val;
-                        const sVal = String(val).trim();
-                        if (/^\d{4}-\d{2}-\d{2}$/.test(sVal)) {
-                            const [y, m, d] = sVal.split('-').map(Number);
-                            return new Date(y, m - 1, d);
-                        }
-                        else if (/^\d{8}$/.test(sVal)) {
-                            const y = parseInt(sVal.slice(0, 4), 10);
-                            const m = parseInt(sVal.slice(4, 6), 10);
-                            const d = parseInt(sVal.slice(6, 8), 10);
-                            return new Date(y, m - 1, d);
-                        }
+                    // Convert Date/Timestamp if column type is DATE or TIMESTAMP
+                    const upperType = col.type ? col.type.toUpperCase() : '';
+                    if (upperType.startsWith('DATE') || upperType.startsWith('TIMESTAMP')) {
+                        return this.parseFlexDate(val);
                     }
                     return val;
                 });
@@ -1133,8 +1152,9 @@ class TxtBundleService {
                     const num = parseFloat(cleanStr);
                     return !isNaN(num) && isFinite(Number(cleanStr)) ? num : null;
                 }
-                // Convert Date if column type is DATE
-                if (col.type && col.type.toUpperCase().startsWith('DATE')) {
+                // Convert Date/Timestamp if column type is DATE or TIMESTAMP
+                const upperType = col.type ? col.type.toUpperCase() : '';
+                if (upperType.startsWith('DATE') || upperType.startsWith('TIMESTAMP')) {
                     return this.parseFlexDate(val);
                 }
                 return String(val);

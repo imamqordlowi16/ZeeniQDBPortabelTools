@@ -1951,5 +1951,39 @@ class OracleService {
             }
         }
     }
+    /**
+     * Drop / Delete table from Oracle Database
+     */
+    async dropTable(config, schema, tableName, purge = true) {
+        const startTime = Date.now();
+        let conn = null;
+        try {
+            conn = await this.createConnection(config);
+            const cleanSchema = (schema || config.schema || config.user || '').trim().toUpperCase();
+            const cleanTable = tableName.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '');
+            if (!cleanTable) {
+                throw new Error('Nama tabel tidak boleh kosong.');
+            }
+            const fullTable = cleanSchema ? `"${cleanSchema}"."${cleanTable}"` : `"${cleanTable}"`;
+            const sql = `DROP TABLE ${fullTable}${purge ? ' PURGE' : ''}`;
+            await conn.execute(sql);
+            return { success: true, executionTimeMs: Date.now() - startTime };
+        }
+        catch (err) {
+            return {
+                success: false,
+                error: err?.message || String(err),
+                executionTimeMs: Date.now() - startTime,
+            };
+        }
+        finally {
+            if (conn) {
+                try {
+                    await conn.close();
+                }
+                catch (e) { }
+            }
+        }
+    }
 }
 exports.OracleService = OracleService;
