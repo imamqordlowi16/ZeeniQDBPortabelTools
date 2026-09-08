@@ -139,18 +139,27 @@ class LicenseManager {
                 .digest('hex')
                 .substring(0, 8)
                 .toUpperCase();
+            // Distinguish Subscription vs Permanent:
+            // If key contains '-SUB-' or '-MONTH-' or 'SUBSCRIPTION' -> Subscription
+            // Otherwise -> Permanent (Lifetime)
+            const isSubscription = trimmed.includes('-SUB-') ||
+                trimmed.includes('-SUB') ||
+                trimmed.includes('-MONTH-') ||
+                trimmed.includes('SUBSCRIPTION');
+            const isPermanent = !isSubscription;
+            const typeLabel = isPermanent ? 'Permanen (Lifetime)' : 'Langganan (Subscription)';
             if (trimmed.includes(sigHash) || trimmed.includes(genericSig) || trimmed.endsWith('-PRO2026')) {
                 return {
                     valid: true,
                     tier: 'pro',
-                    message: 'Aktivasi Berhasil! Lisensi ZeenIQ Pro aktif untuk perangkat ini.',
+                    message: `Aktivasi Berhasil! Lisensi ZeenIQ Pro ${typeLabel} aktif untuk perangkat ini.`,
                     licenseInfo: {
                         tier: 'pro',
                         licensedTo: name || 'Licensed Customer',
                         licenseKey: trimmed,
                         machineId: machineId,
                         activatedAt: new Date().toISOString(),
-                        isPermanent: true,
+                        isPermanent: isPermanent,
                     },
                 };
             }
@@ -255,6 +264,30 @@ class LicenseManager {
         catch {
             return false;
         }
+    }
+    /**
+     * Checks if the active license permits applying updates to newer versions.
+     * Subscription and Community editions CANNOT update.
+     * ONLY Permanent (Lifetime) or Team VIP can update!
+     */
+    canApplyUpdates() {
+        const active = this.getActiveLicense();
+        if (active.tier === 'vip') {
+            return { allowed: true };
+        }
+        if (active.tier === 'pro' && active.isPermanent) {
+            return { allowed: true };
+        }
+        if (active.tier === 'pro' && !active.isPermanent) {
+            return {
+                allowed: false,
+                reason: 'Lisensi Anda adalah tipe Langganan (Subscription). Pembaruan ke versi baru hanya diizinkan untuk pemegang Lisensi Permanen (Lifetime). Silakan beli atau upgrade ke Lisensi Permanen untuk mengunduh update.',
+            };
+        }
+        return {
+            allowed: false,
+            reason: 'Pembaruan aplikasi ke versi baru hanya tersedia untuk Lisensi Permanen (Lifetime) atau Team VIP. Silakan beli Lisensi Permanen untuk mendapatkan update berkelanjutan.',
+        };
     }
 }
 exports.LicenseManager = LicenseManager;

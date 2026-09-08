@@ -651,6 +651,16 @@ electron_1.ipcMain.handle('update:check', async (_, customRemote) => {
     }
 });
 electron_1.ipcMain.handle('update:apply', async (_, customRemote) => {
+    // Entitlement Check: Subscription / Community cannot apply updates. Only Permanent or VIP!
+    if (licenseManager) {
+        const permCheck = licenseManager.canApplyUpdates();
+        if (!permCheck.allowed) {
+            const errMsg = permCheck.reason ||
+                'Pembaruan aplikasi ke versi baru hanya diizinkan untuk pemegang Lisensi Permanen (Lifetime).';
+            sendUpdateLog('error', errMsg);
+            throw new Error(errMsg);
+        }
+    }
     const settings = storageService.getSettings();
     const remote = customRemote ||
         settings.updateShareRoot ||
@@ -909,6 +919,11 @@ electron_1.ipcMain.handle('license:validate-and-activate', (_event, key, name) =
 });
 electron_1.ipcMain.handle('license:deactivate', () => {
     return licenseManager ? licenseManager.deactivateLicense() : false;
+});
+electron_1.ipcMain.handle('license:can-update', () => {
+    return licenseManager
+        ? licenseManager.canApplyUpdates()
+        : { allowed: false, reason: 'License manager not ready.' };
 });
 electron_1.ipcMain.handle('shell:open-external', (_event, url) => {
     if (url && (url.startsWith('https://') || url.startsWith('http://'))) {
