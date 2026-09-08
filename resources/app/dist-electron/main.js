@@ -164,6 +164,9 @@ electron_1.ipcMain.handle('oracle:get-schema-table-columns', async (_, config, s
     }
     return await oracleService.getSchemaTableColumns(config, schemaName);
 });
+electron_1.ipcMain.handle('oracle:get-table-column-details', async (_, config, schemaName, tableName) => {
+    return await oracleService.getTableColumnDetails(config, schemaName, tableName);
+});
 electron_1.ipcMain.handle('oracle:get-object-ddl', async (_, config, schemaName, objectType, objectName) => {
     return await oracleService.getObjectDDL(config, schemaName, objectType, objectName);
 });

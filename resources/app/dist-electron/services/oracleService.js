@@ -4,6 +4,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.OracleService = void 0;
+exports.formatOracleDate = formatOracleDate;
 const oracledb_1 = __importDefault(require("oracledb"));
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
@@ -19,11 +20,32 @@ try {
 catch (e) {
     // Already configured
 }
+/**
+ * Format Oracle DATE / TIMESTAMP preserving local database time (UTC+7 / WIB)
+ * Prevents UTC-0 timezone conversion that shifts dates back by 7 hours / 1 day
+ */
+function formatOracleDate(val) {
+    if (val === null || val === undefined)
+        return '';
+    if (typeof val === 'string')
+        return val;
+    if (!(val instanceof Date) || isNaN(val.getTime())) {
+        return String(val);
+    }
+    const pad = (n) => String(n).padStart(2, '0');
+    const YYYY = val.getFullYear();
+    const MM = pad(val.getMonth() + 1);
+    const DD = pad(val.getDate());
+    const HH = pad(val.getHours());
+    const mm = pad(val.getMinutes());
+    const ss = pad(val.getSeconds());
+    return `${YYYY}-${MM}-${DD} ${HH}:${mm}:${ss}`;
+}
 function formatCsvField(val, delimiter = ',') {
     if (val === null || val === undefined)
         return '';
     if (val instanceof Date)
-        return val.toISOString();
+        return formatOracleDate(val);
     if (Buffer.isBuffer(val)) {
         return val.toString('hex').toUpperCase();
     }
@@ -337,6 +359,89 @@ class OracleService {
                 catch (e) { }
             }
             return tableColsMap;
+        }
+        finally {
+            if (conn) {
+                try {
+                    await conn.close();
+                }
+                catch (e) { }
+            }
+        }
+    }
+    /**
+     * Get rich column details for a specific table (data types, lengths, precision, nullability, comments)
+     */
+    async getTableColumnDetails(config, schemaName, tableName) {
+        let conn = null;
+        try {
+            conn = await this.createConnection(config);
+            const owner = schemaName ? schemaName.toUpperCase() : config.user.toUpperCase();
+            const targetTable = tableName.toUpperCase();
+            const query = `
+        SELECT 
+          c.COLUMN_NAME,
+          c.DATA_TYPE,
+          c.DATA_LENGTH,
+          c.DATA_PRECISION,
+          c.DATA_SCALE,
+          c.NULLABLE,
+          c.COLUMN_ID,
+          cm.COMMENTS
+        FROM ALL_TAB_COLS c
+        LEFT JOIN ALL_COL_COMMENTS cm 
+          ON c.OWNER = cm.OWNER 
+         AND c.TABLE_NAME = cm.TABLE_NAME 
+         AND c.COLUMN_NAME = cm.COLUMN_NAME
+        WHERE c.OWNER = :owner 
+          AND c.TABLE_NAME = :tableName
+          AND c.HIDDEN_COLUMN = 'NO'
+        ORDER BY c.COLUMN_ID ASC
+      `;
+            let result = null;
+            try {
+                result = await conn.execute(query, { owner, tableName: targetTable });
+            }
+            catch (allColsErr) {
+                // Fallback to USER_TAB_COLS if user lacks access to ALL_TAB_COLS
+                if (owner === config.user.toUpperCase()) {
+                    const fallbackQuery = `
+            SELECT 
+              c.COLUMN_NAME,
+              c.DATA_TYPE,
+              c.DATA_LENGTH,
+              c.DATA_PRECISION,
+              c.DATA_SCALE,
+              c.NULLABLE,
+              c.COLUMN_ID,
+              cm.COMMENTS
+            FROM USER_TAB_COLS c
+            LEFT JOIN USER_COL_COMMENTS cm 
+              ON c.TABLE_NAME = cm.TABLE_NAME 
+             AND c.COLUMN_NAME = cm.COLUMN_NAME
+            WHERE c.TABLE_NAME = :tableName
+              AND c.HIDDEN_COLUMN = 'NO'
+            ORDER BY c.COLUMN_ID ASC
+          `;
+                    result = await conn.execute(fallbackQuery, { tableName: targetTable });
+                }
+            }
+            if (!result?.rows)
+                return [];
+            return result.rows.map((r) => ({
+                columnName: String(r[0] || ''),
+                dataType: String(r[1] || ''),
+                dataLength: r[2] !== null && r[2] !== undefined ? Number(r[2]) : undefined,
+                dataPrecision: r[3] !== null && r[3] !== undefined ? Number(r[3]) : undefined,
+                dataScale: r[4] !== null && r[4] !== undefined ? Number(r[4]) : undefined,
+                nullable: r[5] === 'Y',
+                columnId: r[6] !== null && r[6] !== undefined ? Number(r[6]) : undefined,
+                comments: r[7] ? String(r[7]) : undefined,
+            }));
+        }
+        catch (err) {
+            console.warn(`[OracleService] getTableColumnDetails error for ${schemaName}.${tableName}:`, err);
+            return [];
         }
         finally {
             if (conn) {
@@ -909,8 +1014,8 @@ class OracleService {
                                             valParts.push(String(val));
                                         }
                                         else if (val instanceof Date) {
-                                            const isoStr = val.toISOString().replace('T', ' ').replace('Z', '').split('.')[0];
-                                            valParts.push(`TO_DATE('${isoStr}', 'YYYY-MM-DD HH24:MI:SS')`);
+                                            const dateStr = formatOracleDate(val);
+                                            valParts.push(`TO_DATE('${dateStr}', 'YYYY-MM-DD HH24:MI:SS')`);
                                         }
                                         else if (typeof val === 'string') {
                                             valParts.push(`'${val.replace(/'/g, "''")}'`);
@@ -1411,8 +1516,8 @@ class OracleService {
                                             valParts.push(String(val));
                                         }
                                         else if (val instanceof Date) {
-                                            const isoStr = val.toISOString().replace('T', ' ').replace('Z', '').split('.')[0];
-                                            valParts.push(`TO_DATE('${isoStr}', 'YYYY-MM-DD HH24:MI:SS')`);
+                                            const dateStr = formatOracleDate(val);
+                                            valParts.push(`TO_DATE('${dateStr}', 'YYYY-MM-DD HH24:MI:SS')`);
                                         }
                                         else if (typeof val === 'string') {
                                             valParts.push(`'${val.replace(/'/g, "''")}'`);
@@ -1998,7 +2103,7 @@ class OracleService {
                                 if (val === null || val === undefined)
                                     return null;
                                 if (val instanceof Date)
-                                    return val.toISOString();
+                                    return formatOracleDate(val);
                                 if (Buffer.isBuffer(val)) {
                                     const meta = columnMeta[colIdx];
                                     const isRawType = meta?.dataType?.toUpperCase().includes('RAW');
@@ -2059,7 +2164,7 @@ class OracleService {
                                 if (val === null || val === undefined)
                                     return null;
                                 if (val instanceof Date)
-                                    return val.toISOString();
+                                    return formatOracleDate(val);
                                 if (Buffer.isBuffer(val)) {
                                     const meta = columnMeta[colIdx];
                                     const isRawType = meta?.dataType?.toUpperCase().includes('RAW');
@@ -2182,7 +2287,7 @@ class OracleService {
                 if (val === null || val === undefined)
                     return null;
                 if (val instanceof Date)
-                    return val.toISOString();
+                    return formatOracleDate(val);
                 if (Buffer.isBuffer(val)) {
                     const meta = item.columnMeta[colIdx];
                     const isRawType = meta?.dataType?.toUpperCase().includes('RAW');
@@ -2306,7 +2411,16 @@ class OracleService {
                     if (format === 'jsonl') {
                         const obj = {};
                         columns.forEach((col, idx) => {
-                            obj[col] = row[idx];
+                            const cellVal = row[idx];
+                            if (cellVal instanceof Date) {
+                                obj[col] = formatOracleDate(cellVal);
+                            }
+                            else if (Buffer.isBuffer(cellVal)) {
+                                obj[col] = cellVal.toString('hex').toUpperCase();
+                            }
+                            else {
+                                obj[col] = cellVal;
+                            }
                         });
                         line = JSON.stringify(obj) + '\n';
                     }
