@@ -16,6 +16,7 @@ const appVersionService_1 = require("./services/appVersionService");
 const publishAccessService_1 = require("./services/publishAccessService");
 const updateService_1 = require("./services/updateService");
 const txtBundleService_1 = require("./services/txtBundleService");
+const multiDbService_1 = require("./services/multiDbService");
 function writeLog(msg) {
     const line = `[${new Date().toISOString()}] ${msg}\n`;
     try {
@@ -39,6 +40,7 @@ writeLog('Application bootstrap starting...');
 let mainWindow = null;
 let storageService;
 let oracleService;
+let multiDbService;
 let datapumpService;
 let schedulerService;
 let sandboxService;
@@ -48,6 +50,7 @@ function initServices() {
     try {
         storageService = new storageService_1.StorageService();
         oracleService = new oracleService_1.OracleService();
+        multiDbService = new multiDbService_1.MultiDbService();
         datapumpService = new datapumpService_1.DataPumpService();
         schedulerService = new schedulerService_1.SchedulerService(storageService, oracleService, datapumpService);
         sandboxService = new sandboxService_1.SandboxService();
@@ -136,29 +139,47 @@ const sendUpdateLog = (type, message) => {
         mainWindow.webContents.send('update:log', item);
     }
 };
-// ==================== ORACLE IPC HANDLERS ====================
+// ==================== ORACLE & MULTI-DB IPC HANDLERS ====================
 electron_1.ipcMain.handle('oracle:test-connection', async (_, config) => {
+    if (config.dbType && config.dbType !== 'oracle') {
+        return await multiDbService.testConnection(config);
+    }
     return await oracleService.testConnection(config);
 });
 electron_1.ipcMain.handle('oracle:get-schemas', async (_, config) => {
+    if (config.dbType && config.dbType !== 'oracle') {
+        return await multiDbService.getSchemas(config);
+    }
     return await oracleService.getSchemas(config);
 });
 electron_1.ipcMain.handle('oracle:get-schema-objects', async (_, config, schemaName) => {
+    if (config.dbType && config.dbType !== 'oracle') {
+        return await multiDbService.getSchemaObjects(config, schemaName);
+    }
     return await oracleService.getSchemaObjects(config, schemaName);
 });
 electron_1.ipcMain.handle('oracle:get-schema-table-columns', async (_, config, schemaName) => {
+    if (config.dbType && config.dbType !== 'oracle') {
+        return await multiDbService.getSchemaTableColumns(config, schemaName);
+    }
     return await oracleService.getSchemaTableColumns(config, schemaName);
 });
 electron_1.ipcMain.handle('oracle:get-object-ddl', async (_, config, schemaName, objectType, objectName) => {
     return await oracleService.getObjectDDL(config, schemaName, objectType, objectName);
 });
 electron_1.ipcMain.handle('oracle:get-table-live-count', async (_, config, schemaName, tableName) => {
+    if (config.dbType && config.dbType !== 'oracle') {
+        return await multiDbService.getTableLiveRowCount(config, schemaName, tableName);
+    }
     return await oracleService.getTableLiveRowCount(config, schemaName, tableName);
 });
 electron_1.ipcMain.handle('oracle:detect-binaries', async (_, customPath) => {
     return datapumpService.detectOracleBinaries(customPath);
 });
 electron_1.ipcMain.handle('oracle:execute-query', async (_, config, sql, maxRows, targetSchema) => {
+    if (config.dbType && config.dbType !== 'oracle') {
+        return await multiDbService.executeQuery(config, sql, maxRows, targetSchema);
+    }
     return await oracleService.executeQuery(config, sql, maxRows, targetSchema);
 });
 electron_1.ipcMain.handle('oracle:import-data', async (_, config, options) => {

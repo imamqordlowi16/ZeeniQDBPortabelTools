@@ -1827,7 +1827,7 @@ class OracleService {
         }
         return 'Query';
     }
-    async executeQuery(config, sql, maxRows = 1000, targetSchema) {
+    async executeQuery(config, sql, maxRows = 0, targetSchema) {
         const startTime = Date.now();
         let conn = null;
         try {
@@ -1909,10 +1909,11 @@ class OracleService {
                         (/^\(/i.test(strippedClean) && /\bSELECT\b/i.test(strippedClean)));
                 try {
                     if (isSelect) {
-                        const result = await conn.execute(cleanStmt, [], {
-                            maxRows: maxRows,
+                        const executeOptions = {
                             outFormat: oracledb_1.default.OUT_FORMAT_ARRAY,
-                        });
+                            maxRows: maxRows && maxRows > 0 ? maxRows : 0,
+                        };
+                        const result = await conn.execute(cleanStmt, [], executeOptions);
                         const columnMeta = (result.metaData || []).map((m) => {
                             let typeStr = m.dbTypeName || '';
                             if (!typeStr && m.dbType) {
