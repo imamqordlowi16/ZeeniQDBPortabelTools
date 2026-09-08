@@ -273,7 +273,7 @@ electron_1.ipcMain.handle('ai:call-provider', async (_, params) => {
                     ],
                     generationConfig: {
                         temperature: 0.2,
-                        maxOutputTokens: 2048,
+                        maxOutputTokens: 8192,
                     }
                 })
             });
@@ -297,7 +297,7 @@ electron_1.ipcMain.handle('ai:call-provider', async (_, params) => {
                 },
                 body: JSON.stringify({
                     model: selectedModel,
-                    max_tokens: 2048,
+                    max_tokens: 8192,
                     system: systemPrompt,
                     messages: [
                         { role: 'user', content: userPrompt }
