@@ -15,6 +15,7 @@ const networkService_1 = require("./services/networkService");
 const appVersionService_1 = require("./services/appVersionService");
 const publishAccessService_1 = require("./services/publishAccessService");
 const updateService_1 = require("./services/updateService");
+const licenseManager_1 = require("./services/licenseManager");
 const txtBundleService_1 = require("./services/txtBundleService");
 const multiDbService_1 = require("./services/multiDbService");
 function writeLog(msg) {
@@ -46,8 +47,10 @@ let schedulerService;
 let sandboxService;
 let networkService;
 let txtBundleService;
+let licenseManager;
 function initServices() {
     try {
+        licenseManager = new licenseManager_1.LicenseManager();
         storageService = new storageService_1.StorageService();
         oracleService = new oracleService_1.OracleService();
         multiDbService = new multiDbService_1.MultiDbService();
@@ -79,6 +82,20 @@ function createWindow() {
         },
     });
     mainWindow.removeMenu();
+    // Anti-Tamper & Security: Disable DevTools & debugging shortcuts in production
+    if (!process.env.VITE_DEV_SERVER_URL) {
+        mainWindow.webContents.on('devtools-opened', () => {
+            mainWindow?.webContents.closeDevTools();
+        });
+        mainWindow.webContents.on('before-input-event', (event, input) => {
+            // Block F12, Ctrl+Shift+I, Ctrl+Shift+J, Ctrl+Shift+C, Ctrl+U
+            if (input.key === 'F12' ||
+                (input.control && input.shift && ['i', 'I', 'j', 'J', 'c', 'C'].includes(input.key)) ||
+                (input.control && ['u', 'U'].includes(input.key))) {
+                event.preventDefault();
+            }
+        });
+    }
     mainWindow.webContents.on('did-fail-load', (e, code, desc, url) => {
         writeLog(`[RENDERER LOAD FAILED] code=${code} desc=${desc} url=${url}`);
     });
@@ -862,4 +879,41 @@ electron_1.ipcMain.handle('tools:run-script', async (_, scriptKey, customParams,
             resolve({ success: false, error: err.message });
         });
     });
+});
+// ==========================================
+// LICENSE & COMMERCIAL SYSTEM IPC
+// ==========================================
+electron_1.ipcMain.handle('license:get-machine-id', () => {
+    return licenseManager ? licenseManager.getMachineId() : 'ZN-DEFAULT-MACHINE-ID';
+});
+electron_1.ipcMain.handle('license:get-active', () => {
+    return licenseManager
+        ? licenseManager.getActiveLicense()
+        : {
+            tier: 'community',
+            licensedTo: 'Community User',
+            licenseKey: '',
+            machineId: 'ZN-DEFAULT-MACHINE-ID',
+            isPermanent: false,
+        };
+});
+electron_1.ipcMain.handle('license:validate-and-activate', (_event, key, name) => {
+    if (!licenseManager) {
+        return { valid: false, tier: 'community', message: 'License manager not initialized.' };
+    }
+    const result = licenseManager.validateKey(key, name);
+    if (result.valid && result.licenseInfo) {
+        licenseManager.saveLicense(result.licenseInfo);
+    }
+    return result;
+});
+electron_1.ipcMain.handle('license:deactivate', () => {
+    return licenseManager ? licenseManager.deactivateLicense() : false;
+});
+electron_1.ipcMain.handle('shell:open-external', (_event, url) => {
+    if (url && (url.startsWith('https://') || url.startsWith('http://'))) {
+        electron_1.shell.openExternal(url);
+        return true;
+    }
+    return false;
 });

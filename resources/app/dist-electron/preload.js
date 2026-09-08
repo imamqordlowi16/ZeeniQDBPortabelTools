@@ -118,5 +118,11 @@ const electronAPI = {
         electron_1.ipcRenderer.on('tools:output', listener);
         return () => electron_1.ipcRenderer.removeListener('tools:output', listener);
     },
+    // Licensing & Commercial Protection
+    getMachineId: () => electron_1.ipcRenderer.invoke('license:get-machine-id'),
+    getActiveLicense: () => electron_1.ipcRenderer.invoke('license:get-active'),
+    activateLicense: (key, name) => electron_1.ipcRenderer.invoke('license:validate-and-activate', key, name),
+    deactivateLicense: () => electron_1.ipcRenderer.invoke('license:deactivate'),
+    openExternal: (url) => electron_1.ipcRenderer.invoke('shell:open-external', url),
 };
 electron_1.contextBridge.exposeInMainWorld('electronAPI', electronAPI);
