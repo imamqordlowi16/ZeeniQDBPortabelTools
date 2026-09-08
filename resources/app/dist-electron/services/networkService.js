@@ -156,9 +156,9 @@ class NetworkService {
         });
     }
     /**
-     * Run full diagnostics for Corp DB & Internet & VPN
+     * Run full diagnostics for Intranet DB & Internet & VPN
      */
-    async runDiagnostics(corpHost = 'dc1sssdbo02.corp.bi.go.id') {
+    async runDiagnostics(corpHost = '127.0.0.1') {
         const [interfaces, vpn, corpRes, internetRes] = await Promise.all([
             this.getNetworkInterfaces(),
             this.getVpnStatus(),
@@ -184,11 +184,11 @@ class NetworkService {
      * Generate Dual-Network batch scripts (Setup & Reset)
      */
     generateDualNetworkScripts(config) {
-        const corpSubnet = config.corpHostOrSubnet.trim() || '10.161.0.0';
-        const mask = config.corpMask.trim() || '255.255.0.0';
+        const corpSubnet = config.corpHostOrSubnet.trim() || '192.168.1.0';
+        const mask = config.corpMask.trim() || '255.255.255.0';
         const wifiGw = config.wifiGateway ? config.wifiGateway.trim() : '';
         const setupPs1 = `# =========================================================================
-# ZeenIQ Oracle Tools - Smart Dual Network & Sangfor Coexistence Setup
+# ZeenIQ Oracle Tools - Smart Dual Network & Intranet Routing Setup
 # =========================================================================
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -198,25 +198,19 @@ if (-not $isAdmin) {
     exit
 }
 
-$Host.UI.RawUI.WindowTitle = "ZeenIQ Tools - Smart Dual-Network & Sangfor Routing Setup"
+$Host.UI.RawUI.WindowTitle = "ZeenIQ Tools - Smart Dual-Network Routing Setup"
 Clear-Host
 
 Write-Host "=========================================================================" -ForegroundColor Green
-Write-Host "      ZeenIQ Oracle Tools - Smart Dual-Network & Sangfor Coexistence" -ForegroundColor Green
+Write-Host "      ZeenIQ Oracle Tools - Smart Dual-Network Routing Setup" -ForegroundColor Green
 Write-Host "=========================================================================" -ForegroundColor Green
 Write-Host ""
 
 $ErrorActionPreference = "SilentlyContinue"
 
 # 1. Bersihkan rute lama agar tidak terjadi conflict
-Write-Host "[1/6] Membersihkan rute lama agar tidak terjadi conflict..." -ForegroundColor Cyan
+Write-Host "[1/4] Membersihkan rute lama agar tidak terjadi conflict..." -ForegroundColor Cyan
 route delete ${corpSubnet} | Out-Null
-route delete 10.161.0.0 | Out-Null
-route delete 10.161.10.135 | Out-Null
-route delete 10.149.0.0 | Out-Null
-route delete 10.240.0.0 | Out-Null
-route delete 10.28.224.62 | Out-Null
-route delete 10.28.0.0 | Out-Null
 Write-Host "  [+] Pembersihan tabel routing selesai." -ForegroundColor Green
 
 Write-Host "[2/6] Mengatur Metrik Prioritas Interface..." -ForegroundColor Cyan
@@ -225,10 +219,10 @@ Set-NetIPInterface -InterfaceAlias "*Wireless*" -InterfaceMetric 5
 Set-NetIPInterface -InterfaceAlias "*WLAN*" -InterfaceMetric 5
 Set-NetIPInterface -InterfaceAlias "Ethernet*" -InterfaceMetric ${config.ethernetMetric || 10}
 Set-NetIPInterface -InterfaceAlias "*aTrust*" -InterfaceMetric 100
-Set-NetIPInterface -InterfaceAlias "*Sangfor*" -InterfaceMetric 100
-Write-Host "  [+] Metrik: Wi-Fi (5) > Ethernet (${config.ethernetMetric || 10}) > Sangfor aTrust (100)" -ForegroundColor Green
+Set-NetIPInterface -InterfaceAlias "*Sangfor*" -InterfaceMetric 100 -ErrorAction SilentlyContinue
+Write-Host "  [+] Metrik: Wi-Fi (5) > Ethernet (${config.ethernetMetric || 10})" -ForegroundColor Green
 
-Write-Host "[3/6] Mengunci Rute Database Bank Indonesia ke Kartu Wi-Fi Fisik..." -ForegroundColor Cyan
+Write-Host "[3/4] Mengunci Rute Database Intranet ke Kartu Wi-Fi Fisik..." -ForegroundColor Cyan
 $customGw = '${wifiGw}'
 $wifi = (Get-NetIPConfiguration | Where-Object { $_.InterfaceAlias -like "*Wi-Fi*" -or $_.InterfaceAlias -like "*Wireless*" -or $_.InterfaceAlias -like "*WLAN*" } | Select-Object -First 1)
 $gw = $null
@@ -244,67 +238,27 @@ if ($wifi) {
 
 if ($gw -and $ifIndex) {
     Write-Host "  [+] Gateway Wi-Fi Ditemukan: $gw (Interface ID: $ifIndex)" -ForegroundColor Green
-    Write-Host "  [+] Menambahkan rute presisi DB Bank Indonesia (${corpSubnet} & 10.161.10.135)..." -ForegroundColor Green
-    route -p add 10.161.10.135 mask 255.255.255.255 $gw IF $ifIndex metric 1 | Out-Null
+    Write-Host "  [+] Menambahkan rute presisi DB Intranet (${corpSubnet})..." -ForegroundColor Green
     route -p add ${corpSubnet} mask ${mask} $gw IF $ifIndex metric 1 | Out-Null
-    route -p add 10.161.0.0 mask 255.255.0.0 $gw IF $ifIndex metric 1 | Out-Null
-    route -p add 10.149.0.0 mask 255.255.0.0 $gw IF $ifIndex metric 1 | Out-Null
-    route -p add 10.240.0.0 mask 255.255.0.0 $gw IF $ifIndex metric 1 | Out-Null
 } elseif ($gw) {
     Write-Host "  [+] Gateway Wi-Fi Ditemukan: $gw" -ForegroundColor Green
-    route -p add 10.161.10.135 mask 255.255.255.255 $gw metric 1 | Out-Null
     route -p add ${corpSubnet} mask ${mask} $gw metric 1 | Out-Null
-    route -p add 10.161.0.0 mask 255.255.0.0 $gw metric 1 | Out-Null
-    route -p add 10.149.0.0 mask 255.255.0.0 $gw metric 1 | Out-Null
-    route -p add 10.240.0.0 mask 255.255.0.0 $gw metric 1 | Out-Null
 } elseif ($ifIndex) {
     Write-Host "  [+] Gateway Wi-Fi kosong, mengikat ke Interface Wi-Fi (IF $ifIndex)..." -ForegroundColor Yellow
-    route -p add 10.161.10.135 mask 255.255.255.255 0.0.0.0 IF $ifIndex metric 1 | Out-Null
     route -p add ${corpSubnet} mask ${mask} 0.0.0.0 IF $ifIndex metric 1 | Out-Null
-    route -p add 10.161.0.0 mask 255.255.0.0 0.0.0.0 IF $ifIndex metric 1 | Out-Null
-    route -p add 10.149.0.0 mask 255.255.0.0 0.0.0.0 IF $ifIndex metric 1 | Out-Null
-    route -p add 10.240.0.0 mask 255.255.0.0 0.0.0.0 IF $ifIndex metric 1 | Out-Null
 } else {
     Write-Host "  [!] Kartu Wi-Fi tidak terdeteksi aktif." -ForegroundColor Red
 }
 
-Write-Host "[4/6] Mengunci Rute DB Proyek 62 ke Sangfor aTrust (aTrustVNIC)..." -ForegroundColor Cyan
-$atrust = Get-NetAdapter | Where-Object { $_.Name -like "*aTrust*" -or $_.InterfaceDescription -like "*Sangfor*" -or $_.InterfaceDescription -like "*aTrust*" } | Select-Object -First 1
-if ($atrust -and $atrust.Status -eq "Up") {
-    $atrustIpConfig = Get-NetIPConfiguration -InterfaceIndex $atrust.InterfaceIndex -ErrorAction SilentlyContinue
-    $atrustGw = $atrustIpConfig.IPv4DefaultGateway.NextHop
-    if ($atrustGw) {
-        route -p add 10.28.224.62 mask 255.255.255.255 $atrustGw IF $atrust.InterfaceIndex metric 1 | Out-Null
-        route -p add 10.28.0.0 mask 255.255.0.0 $atrustGw IF $atrust.InterfaceIndex metric 1 | Out-Null
-    } else {
-        route -p add 10.28.224.62 mask 255.255.255.255 0.0.0.0 IF $atrust.InterfaceIndex metric 1 | Out-Null
-        route -p add 10.28.0.0 mask 255.255.0.0 0.0.0.0 IF $atrust.InterfaceIndex metric 1 | Out-Null
-    }
-    Write-Host "  [+] Tunnel Sangfor aTrust AKTIF: DB Proyek (10.28.224.62) terkunci ke Sangfor." -ForegroundColor Green
-} else {
-    Write-Host "  [*] Sangfor aTrust standby / belum terhubung." -ForegroundColor Gray
-}
-
-Write-Host "[5/6] Mendaftarkan Hostname DNS Bank Indonesia ke Windows Hosts..." -ForegroundColor Cyan
-$hostsPath = "$env:windir\\System32\\drivers\\etc\\hosts"
-$hostsContent = Get-Content $hostsPath -Raw -ErrorAction SilentlyContinue
-if ($hostsContent -notmatch "dc1sssdb002") {
-    [System.IO.File]::AppendAllText($hostsPath, [Environment]::NewLine + "10.161.10.135  dc1sssdb002.corp.bi.go.id  dc1sssdbo02.corp.bi.go.id  sss.corp.bi.go.id")
-    Write-Host "  [+] Mapping DNS dc1sssdb002 -> 10.161.10.135 berhasil didaftarkan ke hosts." -ForegroundColor Green
-} else {
-    Write-Host "  [+] Mapping DNS Bank Indonesia sudah aktif di hosts." -ForegroundColor Green
-}
-
-Write-Host "[6/6] Membersihkan DNS & Socket Cache Windows..." -ForegroundColor Cyan
+Write-Host "[4/5] Membersihkan DNS & Socket Cache Windows..." -ForegroundColor Cyan
 ipconfig /flushdns | Out-Null
 Write-Host "  [+] DNS Cache dibersihkan." -ForegroundColor Green
 
 Write-Host ""
 Write-Host "=========================================================================" -ForegroundColor Green
-Write-Host "BERHASIL! Dual-Network dan Sangfor telah di-konfigurasi secara harmonis:" -ForegroundColor Green
-Write-Host " - Internet & Sandbox        --> Jalur ETHERNET (Metric ${config.ethernetMetric})" -ForegroundColor White
-Write-Host " - DB Bank Indonesia (${corpSubnet})--> Jalur WI-FI Intranet (Metric 1)" -ForegroundColor White
-Write-Host " - DB Proyek 62 (10.28.224)  --> Jalur SANGFOR aTrust (Metric 1)" -ForegroundColor White
+Write-Host "BERHASIL! Konfigurasi Dual-Network Routing telah diterapkan:" -ForegroundColor Green
+Write-Host " - Internet & Jaringan Utama --> Jalur ETHERNET (Metric ${config.ethernetMetric})" -ForegroundColor White
+Write-Host " - Database Intranet (${corpSubnet}) --> Jalur WI-FI (Metric 1)" -ForegroundColor White
 Write-Host "=========================================================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Tekan tombol apa saja untuk menutup jendela ini..." -ForegroundColor Yellow
@@ -337,11 +291,8 @@ Set-NetIPInterface -InterfaceAlias "Wi-Fi*" -AutomaticMetric Enabled
 
 Write-Host "[2/2] Menghapus static route khusus..." -ForegroundColor Cyan
 route delete 10.0.0.0 | Out-Null
-route delete 10.161.0.0 | Out-Null
-route delete 10.161.10.135 | Out-Null
-route delete 10.149.0.0 | Out-Null
-route delete 10.240.0.0 | Out-Null
-route delete 10.28.224.62 | Out-Null
+route delete 192.168.0.0 | Out-Null
+route delete 172.16.0.0 | Out-Null
 
 Write-Host ""
 Write-Host "=========================================================================" -ForegroundColor Green

@@ -121,7 +121,7 @@ class OracleService {
                     continue;
                 }
                 if (msg.includes('NJS-530')) {
-                    const friendlyErr = new Error(`Host '${config.host}' tidak dapat dijangkau di jaringan Anda (NJS-530). Pastikan nama host/IP benar, VPN (Sangfor) aktif, atau gunakan IP langsung (misal: 10.161.10.135).`);
+                    const friendlyErr = new Error(`Host '${config.host}' tidak dapat dijangkau di jaringan Anda (NJS-530). Pastikan nama host/IP dan port benar, VPN aktif, atau periksa konfigurasi jaringan Anda.`);
                     friendlyErr.code = 'NJS-530';
                     throw friendlyErr;
                 }

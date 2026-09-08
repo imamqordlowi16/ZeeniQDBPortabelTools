@@ -96,32 +96,7 @@ class StorageService {
             }
         }
         if (!fs_1.default.existsSync(this.connectionsFile)) {
-            const defaultConnections = [
-                {
-                    id: 'conn-prd-template',
-                    name: 'Oracle PRD Corp (dc1sssdbo02.corp.bi.go.id)',
-                    environment: 'PRD',
-                    host: 'dc1sssdbo02.corp.bi.go.id',
-                    port: 1521,
-                    connectionType: 'serviceName',
-                    serviceName: 'SSSDPRD',
-                    user: 'SYSTEM',
-                    privilege: 'NORMAL',
-                    createdAt: new Date().toISOString(),
-                },
-                {
-                    id: 'conn-dev-template',
-                    name: 'Oracle DEV (Development Database)',
-                    environment: 'DEV',
-                    host: 'localhost',
-                    port: 1521,
-                    connectionType: 'serviceName',
-                    serviceName: 'ORCLDEV',
-                    user: 'SCOTT',
-                    privilege: 'NORMAL',
-                    createdAt: new Date().toISOString(),
-                },
-            ];
+            const defaultConnections = [];
             const jsonStr = JSON.stringify(defaultConnections, null, 2);
             fs_1.default.writeFileSync(this.connectionsFile, jsonStr, 'utf-8');
             this.syncToPortable('connections.json', jsonStr);

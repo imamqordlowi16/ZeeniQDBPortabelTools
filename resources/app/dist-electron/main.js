@@ -728,19 +728,19 @@ electron_1.ipcMain.handle('update:open-log', async () => {
 // Registry of all available system tools
 const SYSTEM_TOOLS_REGISTRY = {
     'aktifkan-relay-sangfor': {
-        label: 'Aktifkan Relay Sangfor → Sandbox',
+        label: 'Aktifkan Port Forwarding / Relay DB',
         script: 'Aktifkan-Relay-Sangfor-Sandbox.ps1',
         scriptType: 'ps1',
         requiresAdmin: true,
-        description: 'Mengaktifkan port forwarding (portproxy) dari host ke dalam Windows Sandbox untuk akses Sangfor DB.',
-        category: 'Sandbox & VPN',
+        description: 'Mengaktifkan port forwarding (portproxy) dari host ke dalam Windows Sandbox untuk akses relay DB.',
+        category: 'Sandbox & Relay',
     },
     'diagnosa-koneksi-db': {
         label: 'Diagnosa Koneksi DB',
         script: 'Diagnosa-Koneksi-DB.ps1',
         scriptType: 'ps1',
         requiresAdmin: false,
-        description: 'Mengecek rute jaringan, interface aktif, dan test koneksi TCP ke Database Bank Indonesia (10.161.10.135).',
+        description: 'Mengecek rute jaringan, interface aktif, dan test koneksi TCP port ke database target.',
         category: 'Diagnostik',
     },
     'enable-windows-sandbox': {
@@ -749,7 +749,7 @@ const SYSTEM_TOOLS_REGISTRY = {
         scriptType: 'bat',
         requiresAdmin: true,
         description: 'Mengaktifkan fitur Windows Sandbox (Containers-DisposableClientVM) + Hyper-V. Mendukung Win10 dan Win11 semua edisi.',
-        category: 'Sandbox & VPN',
+        category: 'Sandbox & Relay',
     },
     'fix-windows-sandbox': {
         label: 'Fix Black Screen Sandbox',
@@ -757,14 +757,14 @@ const SYSTEM_TOOLS_REGISTRY = {
         scriptType: 'bat',
         requiresAdmin: true,
         description: 'Memperbaiki masalah layar hitam (black screen) saat membuka Windows Sandbox dengan reset registry dan layanan vmcompute.',
-        category: 'Sandbox & VPN',
+        category: 'Sandbox & Relay',
     },
     'kunci-rute-db-bi': {
-        label: 'Kunci Rute DB BI ke Wi-Fi',
+        label: 'Kunci Rute DB Intranet ke Wi-Fi',
         script: 'Kunci-Rute-DB-BI.ps1',
         scriptType: 'ps1',
         requiresAdmin: true,
-        description: 'Memaksa route 10.161.10.135 (DB Bank Indonesia) melewati kartu Wi-Fi. Mencegah Sangfor/Ethernet mencaplok jalur DB.',
+        description: 'Memaksa route IP DB target melewati kartu Wi-Fi. Mencegah adapter lain mencaplok jalur DB.',
         category: 'Network Routing',
     },
     'reset-network-routing': {
@@ -772,15 +772,15 @@ const SYSTEM_TOOLS_REGISTRY = {
         script: 'Reset-Network-Routing.ps1',
         scriptType: 'ps1',
         requiresAdmin: true,
-        description: 'Mengembalikan semua metric interface dan static route ke kondisi default Windows. Gunakan jika jaringan kacau.',
+        description: 'Mengembalikan semua metric interface dan static route ke kondisi default Windows.',
         category: 'Network Routing',
     },
     'setup-dual-network': {
-        label: 'Setup Dual Network',
+        label: 'Setup Dual Network Routing',
         script: 'Setup-Dual-Network.ps1',
         scriptType: 'ps1',
         requiresAdmin: true,
-        description: 'Konfigurasi lengkap dual-network: Internet via Ethernet, DB BI via Wi-Fi, DB Proyek via Sangfor — semuanya harmonis.',
+        description: 'Konfigurasi routing dual-network: Internet via Ethernet, DB Intranet via Wi-Fi.',
         category: 'Network Routing',
     },
 };

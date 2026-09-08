@@ -530,12 +530,18 @@ timeout /t 2 /nobreak >nul
 
 ${updateCommands}
 
-if exist "%DEST%\\${exeName}" (
+if exist "%DEST%\\ZeenIQ-Oracle-Tools-VIP.exe" (
+  start "" "%DEST%\\ZeenIQ-Oracle-Tools-VIP.exe"
+) else if exist "%DEST%\\${exeName}" (
   start "" "%DEST%\\${exeName}"
-) else if exist "%DEST%\\start-app.bat" (
-  start "" "%DEST%\\start-app.bat"
+) else if exist "%DEST%\\RUN-ZEENIQ-TEAM.bat" (
+  start "" "%DEST%\\RUN-ZEENIQ-TEAM.bat"
 ) else if exist "%DEST%\\RUN-ZEENIQ.bat" (
   start "" "%DEST%\\RUN-ZEENIQ.bat"
+) else if exist "%DEST%\\start-app.bat" (
+  start "" "%DEST%\\start-app.bat"
+) else if exist "%DEST%\\electron.exe" (
+  start "" "%DEST%\\electron.exe"
 )
 exit /b 0
 `;

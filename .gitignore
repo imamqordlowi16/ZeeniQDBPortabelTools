@@ -10,6 +10,7 @@ debug.log
 
 # Binary Electron runtime (terlalu besar untuk GitHub, gunakan Git Share lokal)
 ZeenIQ-Oracle-Tools.exe
+ZeenIQ-Oracle-Tools-VIP.exe
 ZeenIQDbTools.Updater.exe
 resources/app/ZeenIQDbTools.Updater.exe
 
