@@ -10,6 +10,15 @@ const electronAPI = {
     getObjectDDL: (config, schemaName, objectType, objectName) => electron_1.ipcRenderer.invoke('oracle:get-object-ddl', config, schemaName, objectType, objectName),
     getTableLiveRowCount: (config, schemaName, tableName) => electron_1.ipcRenderer.invoke('oracle:get-table-live-count', config, schemaName, tableName),
     executeQuery: (config, sql, maxRows, targetSchema) => electron_1.ipcRenderer.invoke('oracle:execute-query', config, sql, maxRows, targetSchema),
+    fetchCursorRows: (cursorId, count) => electron_1.ipcRenderer.invoke('oracle:fetch-cursor-rows', cursorId, count),
+    closeCursor: (cursorId) => electron_1.ipcRenderer.invoke('oracle:close-cursor', cursorId),
+    startStreamExport: (config, sql, targetPath, options) => electron_1.ipcRenderer.invoke('oracle:start-stream-export', config, sql, targetPath, options),
+    cancelStreamExport: (jobId) => electron_1.ipcRenderer.invoke('oracle:cancel-stream-export', jobId),
+    onStreamExportProgress: (callback) => {
+        const listener = (_, progress) => callback(progress);
+        electron_1.ipcRenderer.on('oracle:stream-export-progress', listener);
+        return () => electron_1.ipcRenderer.removeListener('oracle:stream-export-progress', listener);
+    },
     dropTable: (config, schemaName, tableName, purge, cascade) => electron_1.ipcRenderer.invoke('oracle:drop-table', config, schemaName, tableName, purge, cascade),
     importData: (config, options) => electron_1.ipcRenderer.invoke('oracle:import-data', config, options),
     callAiProvider: (params) => electron_1.ipcRenderer.invoke('ai:call-provider', params),
@@ -72,6 +81,7 @@ const electronAPI = {
     // Native Dialogs & Shell
     selectFolder: (title) => electron_1.ipcRenderer.invoke('dialog:select-folder', title),
     selectFile: (title, filters) => electron_1.ipcRenderer.invoke('dialog:select-file', title, filters),
+    selectSaveFile: (defaultName, filters) => electron_1.ipcRenderer.invoke('dialog:save-file', defaultName, filters),
     selectTxtFiles: (title) => electron_1.ipcRenderer.invoke('dialog:select-txt-files', title),
     openPath: (filePath) => electron_1.ipcRenderer.invoke('shell:open-path', filePath),
     showItemInFolder: (filePath) => electron_1.ipcRenderer.invoke('shell:show-item-in-folder', filePath),

@@ -182,6 +182,44 @@ electron_1.ipcMain.handle('oracle:execute-query', async (_, config, sql, maxRows
     }
     return await oracleService.executeQuery(config, sql, maxRows, targetSchema);
 });
+electron_1.ipcMain.handle('oracle:fetch-cursor-rows', async (_, cursorId, count) => {
+    return await oracleService.fetchNextCursorRows(cursorId, count);
+});
+electron_1.ipcMain.handle('oracle:close-cursor', async (_, cursorId) => {
+    return await oracleService.closeCursor(cursorId);
+});
+electron_1.ipcMain.handle('oracle:start-stream-export', async (event, config, sql, targetPath, options) => {
+    const jobId = `export_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    oracleService
+        .streamExportQuery(config, sql, targetPath, options, jobId, (progress) => {
+        try {
+            if (!event.sender.isDestroyed()) {
+                event.sender.send('oracle:stream-export-progress', progress);
+            }
+        }
+        catch (e) { }
+    })
+        .catch((err) => {
+        try {
+            if (!event.sender.isDestroyed()) {
+                event.sender.send('oracle:stream-export-progress', {
+                    jobId,
+                    rowsExported: 0,
+                    bytesWritten: 0,
+                    elapsedMs: 0,
+                    status: 'error',
+                    error: err?.message || String(err),
+                    targetPath,
+                });
+            }
+        }
+        catch (e) { }
+    });
+    return jobId;
+});
+electron_1.ipcMain.handle('oracle:cancel-stream-export', async (_, jobId) => {
+    return await oracleService.cancelStreamExport(jobId);
+});
 electron_1.ipcMain.handle('oracle:import-data', async (_, config, options) => {
     return await oracleService.importDataBatch(config, options);
 });
@@ -472,6 +510,24 @@ electron_1.ipcMain.handle('dialog:select-file', async (_, title, filters) => {
     });
     if (!res.canceled && res.filePaths.length > 0) {
         return res.filePaths[0];
+    }
+    return null;
+});
+electron_1.ipcMain.handle('dialog:save-file', async (_, defaultName, filters) => {
+    if (!mainWindow)
+        return null;
+    const res = await electron_1.dialog.showSaveDialog(mainWindow, {
+        title: 'Simpan File Export',
+        defaultPath: defaultName || 'export.csv',
+        filters: filters || [
+            { name: 'CSV File (*.csv)', extensions: ['csv'] },
+            { name: 'Tab-Separated File (*.tsv)', extensions: ['tsv'] },
+            { name: 'JSON Lines (*.jsonl)', extensions: ['jsonl'] },
+            { name: 'All Files (*.*)', extensions: ['*'] },
+        ],
+    });
+    if (!res.canceled && res.filePath) {
+        return res.filePath;
     }
     return null;
 });

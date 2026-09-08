@@ -19,8 +19,43 @@ try {
 catch (e) {
     // Already configured
 }
+function formatCsvField(val, delimiter = ',') {
+    if (val === null || val === undefined)
+        return '';
+    if (val instanceof Date)
+        return val.toISOString();
+    if (Buffer.isBuffer(val)) {
+        return val.toString('hex').toUpperCase();
+    }
+    const str = typeof val === 'string' ? val : String(val);
+    if (str.includes(delimiter) ||
+        str.includes('"') ||
+        str.includes('\n') ||
+        str.includes('\r')) {
+        return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+}
 class OracleService {
     activeJobs = new Map();
+    activeCursors = new Map();
+    activeExportJobs = new Map();
+    constructor() {
+        // Periodically sweep idle cursors older than 10 minutes
+        setInterval(() => {
+            const now = Date.now();
+            for (const [id, cursor] of this.activeCursors.entries()) {
+                if (now - cursor.lastUsed > 10 * 60 * 1000) {
+                    try {
+                        cursor.rs.close().catch(() => { });
+                        cursor.conn.close().catch(() => { });
+                    }
+                    catch (e) { }
+                    this.activeCursors.delete(id);
+                }
+            }
+        }, 2 * 60 * 1000).unref();
+    }
     getConnectString(config) {
         if (config.connectionType === 'tns' && config.tnsString) {
             return config.tnsString;
@@ -1907,52 +1942,135 @@ class OracleService {
                 const isSelect = !isPlsql &&
                     (/^(SELECT|WITH)\s+/i.test(strippedClean) ||
                         (/^\(/i.test(strippedClean) && /\bSELECT\b/i.test(strippedClean)));
+                // Ensure active connection is open
+                if (!conn) {
+                    conn = await this.createConnection(config);
+                    if (effectiveSchema && effectiveSchema !== (config.user || '').toUpperCase()) {
+                        try {
+                            await conn.execute(`ALTER SESSION SET CURRENT_SCHEMA = "${effectiveSchema}"`);
+                        }
+                        catch (schemaErr) { }
+                    }
+                }
+                const activeConn = conn;
                 try {
                     if (isSelect) {
-                        const executeOptions = {
-                            outFormat: oracledb_1.default.OUT_FORMAT_ARRAY,
-                            maxRows: maxRows && maxRows > 0 ? maxRows : 0,
-                        };
-                        const result = await conn.execute(cleanStmt, [], executeOptions);
-                        const columnMeta = (result.metaData || []).map((m) => {
-                            let typeStr = m.dbTypeName || '';
-                            if (!typeStr && m.dbType) {
-                                typeStr = String(m.dbType);
-                            }
-                            if (typeStr === 'VARCHAR2' || typeStr === 'CHAR') {
-                                if (m.byteSize)
-                                    typeStr += `(${m.byteSize})`;
-                            }
-                            else if (typeStr === 'NUMBER') {
-                                if (m.precision) {
-                                    typeStr += m.scale ? `(${m.precision},${m.scale})` : `(${m.precision})`;
+                        let columns = [];
+                        let columnMeta = [];
+                        let rows = [];
+                        let cursorId = undefined;
+                        let hasMore = false;
+                        if (maxRows && maxRows > 0) {
+                            const result = await activeConn.execute(cleanStmt, [], {
+                                outFormat: oracledb_1.default.OUT_FORMAT_ARRAY,
+                                resultSet: true,
+                                prefetchRows: Math.min(maxRows, 500),
+                                fetchArraySize: Math.min(maxRows, 500),
+                            });
+                            columnMeta = (result.metaData || []).map((m) => {
+                                let typeStr = m.dbTypeName || '';
+                                if (!typeStr && m.dbType) {
+                                    typeStr = String(m.dbType);
                                 }
+                                if (typeStr === 'VARCHAR2' || typeStr === 'CHAR') {
+                                    if (m.byteSize)
+                                        typeStr += `(${m.byteSize})`;
+                                }
+                                else if (typeStr === 'NUMBER') {
+                                    if (m.precision) {
+                                        typeStr += m.scale ? `(${m.precision},${m.scale})` : `(${m.precision})`;
+                                    }
+                                }
+                                return {
+                                    name: m.name,
+                                    dataType: typeStr || 'VARCHAR2',
+                                    nullable: m.nullable,
+                                    precision: m.precision,
+                                    scale: m.scale,
+                                    byteSize: m.byteSize,
+                                };
+                            });
+                            columns = (result.metaData || []).map((m) => m.name);
+                            const rs = result.resultSet;
+                            const rawRows = ((await rs.getRows(maxRows)) || []);
+                            hasMore = rawRows.length === maxRows;
+                            rows = rawRows.map((row) => row.map((val, colIdx) => {
+                                if (val === null || val === undefined)
+                                    return null;
+                                if (val instanceof Date)
+                                    return val.toISOString();
+                                if (Buffer.isBuffer(val)) {
+                                    const meta = columnMeta[colIdx];
+                                    const isRawType = meta?.dataType?.toUpperCase().includes('RAW');
+                                    if (isRawType || val.length === 16) {
+                                        return val.toString('hex').toUpperCase();
+                                    }
+                                    return `[BLOB ${val.length} bytes]`;
+                                }
+                                return String(val);
+                            }));
+                            if (hasMore) {
+                                cursorId = `cur_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+                                this.activeCursors.set(cursorId, {
+                                    conn: activeConn,
+                                    rs,
+                                    lastUsed: Date.now(),
+                                    columnMeta,
+                                    columns,
+                                });
+                                // Transfer connection ownership to activeCursors so finally block does not close it
+                                conn = null;
                             }
-                            return {
-                                name: m.name,
-                                dataType: typeStr || 'VARCHAR2',
-                                nullable: m.nullable,
-                                precision: m.precision,
-                                scale: m.scale,
-                                byteSize: m.byteSize,
+                            else {
+                                await rs.close();
+                            }
+                        }
+                        else {
+                            const executeOptions = {
+                                outFormat: oracledb_1.default.OUT_FORMAT_ARRAY,
+                                maxRows: 0,
                             };
-                        });
-                        const columns = (result.metaData || []).map((m) => m.name);
-                        const rows = (result.rows || []).map((row) => row.map((val, colIdx) => {
-                            if (val === null || val === undefined)
-                                return null;
-                            if (val instanceof Date)
-                                return val.toISOString();
-                            if (Buffer.isBuffer(val)) {
-                                const meta = columnMeta[colIdx];
-                                const isRawType = meta?.dataType?.toUpperCase().includes('RAW');
-                                if (isRawType || val.length === 16) {
-                                    return val.toString('hex').toUpperCase();
+                            const result = await activeConn.execute(cleanStmt, [], executeOptions);
+                            columnMeta = (result.metaData || []).map((m) => {
+                                let typeStr = m.dbTypeName || '';
+                                if (!typeStr && m.dbType) {
+                                    typeStr = String(m.dbType);
                                 }
-                                return `[BLOB ${val.length} bytes]`;
-                            }
-                            return String(val);
-                        }));
+                                if (typeStr === 'VARCHAR2' || typeStr === 'CHAR') {
+                                    if (m.byteSize)
+                                        typeStr += `(${m.byteSize})`;
+                                }
+                                else if (typeStr === 'NUMBER') {
+                                    if (m.precision) {
+                                        typeStr += m.scale ? `(${m.precision},${m.scale})` : `(${m.precision})`;
+                                    }
+                                }
+                                return {
+                                    name: m.name,
+                                    dataType: typeStr || 'VARCHAR2',
+                                    nullable: m.nullable,
+                                    precision: m.precision,
+                                    scale: m.scale,
+                                    byteSize: m.byteSize,
+                                };
+                            });
+                            columns = (result.metaData || []).map((m) => m.name);
+                            rows = (result.rows || []).map((row) => row.map((val, colIdx) => {
+                                if (val === null || val === undefined)
+                                    return null;
+                                if (val instanceof Date)
+                                    return val.toISOString();
+                                if (Buffer.isBuffer(val)) {
+                                    const meta = columnMeta[colIdx];
+                                    const isRawType = meta?.dataType?.toUpperCase().includes('RAW');
+                                    if (isRawType || val.length === 16) {
+                                        return val.toString('hex').toUpperCase();
+                                    }
+                                    return `[BLOB ${val.length} bytes]`;
+                                }
+                                return String(val);
+                            }));
+                        }
                         statementResults.push({
                             sql: cleanStmt,
                             title,
@@ -1962,10 +2080,13 @@ class OracleService {
                             rows,
                             rowCount: rows.length,
                             executionTimeMs: Date.now() - stmtStart,
+                            cursorId,
+                            hasMore,
+                            totalFetched: rows.length,
                         });
                     }
                     else {
-                        const result = await conn.execute(cleanStmt, [], { autoCommit: true });
+                        const result = await activeConn.execute(cleanStmt, [], { autoCommit: true });
                         const affected = result.rowsAffected ?? 0;
                         totalAffectedRows += affected;
                         statementResults.push({
@@ -2015,6 +2136,9 @@ class OracleService {
                 executionTimeMs: Date.now() - startTime,
                 error: hasAnySuccess ? undefined : statementResults.find((s) => s.error)?.error,
                 statementResults,
+                cursorId: primary.cursorId,
+                hasMore: primary.hasMore,
+                totalFetched: primary.rowCount,
             };
         }
         catch (err) {
@@ -2035,6 +2159,248 @@ class OracleService {
                 catch (e) { }
             }
         }
+    }
+    /**
+     * Fetch next batch of rows from an active cursor
+     */
+    async fetchNextCursorRows(cursorId, count = 500) {
+        const item = this.activeCursors.get(cursorId);
+        if (!item) {
+            return {
+                success: false,
+                rows: [],
+                rowCount: 0,
+                hasMore: false,
+                error: 'Cursor query sudah kedaluwarsa atau telah ditutup.',
+            };
+        }
+        try {
+            item.lastUsed = Date.now();
+            const rawRows = ((await item.rs.getRows(count)) || []);
+            const hasMore = rawRows.length === count;
+            const formattedRows = rawRows.map((row) => row.map((val, colIdx) => {
+                if (val === null || val === undefined)
+                    return null;
+                if (val instanceof Date)
+                    return val.toISOString();
+                if (Buffer.isBuffer(val)) {
+                    const meta = item.columnMeta[colIdx];
+                    const isRawType = meta?.dataType?.toUpperCase().includes('RAW');
+                    if (isRawType || val.length === 16) {
+                        return val.toString('hex').toUpperCase();
+                    }
+                    return `[BLOB ${val.length} bytes]`;
+                }
+                return String(val);
+            }));
+            if (!hasMore) {
+                // Auto cleanup finished cursor
+                try {
+                    await item.rs.close();
+                    await item.conn.close();
+                }
+                catch (e) { }
+                this.activeCursors.delete(cursorId);
+            }
+            return {
+                success: true,
+                rows: formattedRows,
+                rowCount: formattedRows.length,
+                hasMore,
+            };
+        }
+        catch (err) {
+            try {
+                await item.rs.close();
+                await item.conn.close();
+            }
+            catch (e) { }
+            this.activeCursors.delete(cursorId);
+            return {
+                success: false,
+                rows: [],
+                rowCount: 0,
+                hasMore: false,
+                error: err?.message || String(err),
+            };
+        }
+    }
+    /**
+     * Explicitly close an active cursor and free database resources
+     */
+    async closeCursor(cursorId) {
+        const item = this.activeCursors.get(cursorId);
+        if (item) {
+            try {
+                await item.rs.close();
+                await item.conn.close();
+            }
+            catch (e) { }
+            this.activeCursors.delete(cursorId);
+        }
+    }
+    /**
+     * Direct-to-Disk Stream Export
+     * Streams millions of rows directly to a CSV/TSV/JSONL file with minimal RAM footprint (< 30 MB)
+     */
+    async streamExportQuery(config, sql, targetPath, options, jobId, onProgress) {
+        const startTime = Date.now();
+        let conn = null;
+        let writeStream = null;
+        let queryStream = null;
+        try {
+            conn = await this.createConnection(config);
+            if (options.targetSchema) {
+                try {
+                    await conn.execute(`ALTER SESSION SET CURRENT_SCHEMA = "${options.targetSchema.toUpperCase()}"`);
+                }
+                catch (e) { }
+            }
+            // Ensure directory exists
+            const dir = path_1.default.dirname(targetPath);
+            if (!fs_1.default.existsSync(dir)) {
+                fs_1.default.mkdirSync(dir, { recursive: true });
+            }
+            writeStream = fs_1.default.createWriteStream(targetPath, { encoding: 'utf8', highWaterMark: 128 * 1024 });
+            const format = options.format || 'csv';
+            const delimiter = options.delimiter || (format === 'tsv' ? '\t' : ',');
+            const includeHeader = options.includeHeader !== false;
+            let isCancelled = false;
+            this.activeExportJobs.set(jobId, {
+                cancel: false,
+                cleanup: async () => {
+                    isCancelled = true;
+                    try {
+                        if (queryStream)
+                            queryStream.destroy();
+                        if (writeStream)
+                            writeStream.end();
+                        if (conn)
+                            await conn.close();
+                    }
+                    catch (e) { }
+                },
+            });
+            let rowCount = 0;
+            let bytesWritten = 0;
+            let columns = [];
+            let lastProgressTime = Date.now();
+            const cleanSql = sql.trim().replace(/;+\s*$/, '').replace(/\/+\s*$/, '').trim();
+            queryStream = conn.queryStream(cleanSql, [], {
+                outFormat: oracledb_1.default.OUT_FORMAT_ARRAY,
+                fetchArraySize: 2000,
+            });
+            await new Promise((resolve, reject) => {
+                queryStream.on('metadata', (metaData) => {
+                    columns = (metaData || []).map((m) => m.name);
+                    if (includeHeader && format !== 'jsonl') {
+                        const headerLine = columns.map((col) => formatCsvField(col, delimiter)).join(delimiter) + '\n';
+                        writeStream.write(headerLine);
+                        bytesWritten += Buffer.byteLength(headerLine);
+                    }
+                });
+                queryStream.on('data', (row) => {
+                    if (isCancelled)
+                        return;
+                    let line = '';
+                    if (format === 'jsonl') {
+                        const obj = {};
+                        columns.forEach((col, idx) => {
+                            obj[col] = row[idx];
+                        });
+                        line = JSON.stringify(obj) + '\n';
+                    }
+                    else {
+                        line = row.map((val) => formatCsvField(val, delimiter)).join(delimiter) + '\n';
+                    }
+                    rowCount++;
+                    bytesWritten += Buffer.byteLength(line);
+                    // Backpressure handling to maintain tiny memory footprint
+                    const canContinue = writeStream.write(line);
+                    if (!canContinue) {
+                        queryStream.pause();
+                        writeStream.once('drain', () => {
+                            if (!isCancelled)
+                                queryStream.resume();
+                        });
+                    }
+                    const now = Date.now();
+                    if (rowCount % 5000 === 0 || now - lastProgressTime > 600) {
+                        lastProgressTime = now;
+                        onProgress?.({
+                            jobId,
+                            rowsExported: rowCount,
+                            bytesWritten,
+                            elapsedMs: now - startTime,
+                            status: 'running',
+                            targetPath,
+                        });
+                    }
+                });
+                queryStream.on('end', () => {
+                    writeStream.end(() => resolve());
+                });
+                queryStream.on('error', (err) => {
+                    reject(err);
+                });
+                writeStream.on('error', (err) => {
+                    reject(err);
+                });
+            });
+            this.activeExportJobs.delete(jobId);
+            const finalProgress = {
+                jobId,
+                rowsExported: rowCount,
+                bytesWritten,
+                elapsedMs: Date.now() - startTime,
+                status: isCancelled ? 'cancelled' : 'completed',
+                targetPath,
+            };
+            onProgress?.(finalProgress);
+            return finalProgress;
+        }
+        catch (err) {
+            this.activeExportJobs.delete(jobId);
+            if (writeStream) {
+                try {
+                    writeStream.end();
+                }
+                catch (e) { }
+            }
+            const errProgress = {
+                jobId,
+                rowsExported: 0,
+                bytesWritten: 0,
+                elapsedMs: Date.now() - startTime,
+                status: 'error',
+                error: err?.message || String(err),
+                targetPath,
+            };
+            onProgress?.(errProgress);
+            throw err;
+        }
+        finally {
+            if (conn) {
+                try {
+                    await conn.close();
+                }
+                catch (e) { }
+            }
+        }
+    }
+    /**
+     * Cancel an active stream export job
+     */
+    async cancelStreamExport(jobId) {
+        const job = this.activeExportJobs.get(jobId);
+        if (job) {
+            job.cancel = true;
+            if (job.cleanup)
+                await job.cleanup();
+            this.activeExportJobs.delete(jobId);
+            return true;
+        }
+        return false;
     }
     async importDataBatch(config, options) {
         let conn = null;
