@@ -1,12 +1,30 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MultiDbService = void 0;
-const pg_1 = require("pg");
-const promise_1 = __importDefault(require("mysql2/promise"));
-const tedious_1 = require("tedious");
+function getPgClientClass() {
+    try {
+        return require('pg').Client;
+    }
+    catch (err) {
+        throw new Error("Modul driver PostgreSQL ('pg') belum terpasang di runtime aplikasi.");
+    }
+}
+function getMysqlModule() {
+    try {
+        return require('mysql2/promise');
+    }
+    catch (err) {
+        throw new Error("Modul driver MySQL ('mysql2') belum terpasang di runtime aplikasi.");
+    }
+}
+function getTediousModule() {
+    try {
+        return require('tedious');
+    }
+    catch (err) {
+        throw new Error("Modul driver SQL Server ('tedious') belum terpasang di runtime aplikasi.");
+    }
+}
 class MultiDbService {
     /**
      * Test connection to target database
@@ -130,8 +148,9 @@ class MultiDbService {
     // POSTGRESQL IMPLEMENTATION
     // ═══════════════════════════════════════════════════════════════════════════
     getPgClient(config, targetSchema) {
+        const PgClientClass = getPgClientClass();
         const database = config.databaseName || config.serviceName || 'postgres';
-        const client = new pg_1.Client({
+        const client = new PgClientClass({
             host: config.host,
             port: config.port || 5432,
             database: database,
@@ -334,8 +353,9 @@ class MultiDbService {
     // MYSQL / MARIADB IMPLEMENTATION
     // ═══════════════════════════════════════════════════════════════════════════
     async getMySqlConnection(config, targetDb) {
+        const mysqlModule = getMysqlModule();
         const database = targetDb || config.databaseName || config.serviceName || undefined;
-        return await promise_1.default.createConnection({
+        return await mysqlModule.createConnection({
             host: config.host,
             port: config.port || 3306,
             database: database,
@@ -567,6 +587,13 @@ class MultiDbService {
     // ═══════════════════════════════════════════════════════════════════════════
     createTediousConnection(config, targetDb) {
         return new Promise((resolve, reject) => {
+            let tedious;
+            try {
+                tedious = getTediousModule();
+            }
+            catch (err) {
+                return reject(err);
+            }
             const database = targetDb || config.databaseName || config.serviceName || 'master';
             const tediousConfig = {
                 server: config.host,
@@ -586,7 +613,7 @@ class MultiDbService {
                     requestTimeout: 60000,
                 },
             };
-            const conn = new tedious_1.Connection(tediousConfig);
+            const conn = new tedious.Connection(tediousConfig);
             conn.on('connect', (err) => {
                 if (err) {
                     reject(err);
@@ -595,7 +622,7 @@ class MultiDbService {
                     resolve(conn);
                 }
             });
-            conn.on('error', (err) => {
+            conn.on('error', () => {
                 // Suppress unhandled error events
             });
             conn.connect();
@@ -606,7 +633,8 @@ class MultiDbService {
         try {
             conn = await this.createTediousConnection(config);
             return new Promise((resolve) => {
-                const req = new tedious_1.Request('SELECT @@VERSION AS ver;', (err) => {
+                const tedious = getTediousModule();
+                const req = new tedious.Request('SELECT @@VERSION AS ver;', (err) => {
                     if (err) {
                         resolve({ success: false, message: `Gagal query SQL Server: ${err.message}` });
                     }
@@ -649,11 +677,12 @@ class MultiDbService {
         try {
             conn = await this.createTediousConnection(config, targetSchema);
             return new Promise((resolve, reject) => {
+                const tedious = getTediousModule();
                 const columns = [];
                 const columnMeta = [];
                 const rows = [];
                 let totalRows = 0;
-                const req = new tedious_1.Request(sql, (err) => {
+                const req = new tedious.Request(sql, (err) => {
                     if (err) {
                         reject(new Error(`[SQL Server Error] ${err.message}`));
                     }
@@ -720,6 +749,7 @@ class MultiDbService {
         try {
             conn = await this.createTediousConnection(config);
             return new Promise((resolve) => {
+                const tedious = getTediousModule();
                 const query = `
           SELECT name 
           FROM sys.databases 
@@ -727,7 +757,7 @@ class MultiDbService {
           ORDER BY name;
         `;
                 const list = [];
-                const req = new tedious_1.Request(query, (err) => {
+                const req = new tedious.Request(query, (err) => {
                     if (err)
                         resolve([]);
                 });
@@ -765,6 +795,7 @@ class MultiDbService {
         try {
             conn = await this.createTediousConnection(config, dbName);
             return new Promise((resolve) => {
+                const tedious = getTediousModule();
                 const query = `
           SELECT 
             TABLE_NAME AS name, 
@@ -774,7 +805,7 @@ class MultiDbService {
           ORDER BY TABLE_NAME;
         `;
                 const list = [];
-                const req = new tedious_1.Request(query, (err) => {
+                const req = new tedious.Request(query, (err) => {
                     if (err)
                         resolve([]);
                 });
@@ -811,13 +842,14 @@ class MultiDbService {
         try {
             conn = await this.createTediousConnection(config, dbName);
             return new Promise((resolve) => {
+                const tedious = getTediousModule();
                 const query = `
           SELECT TABLE_NAME, COLUMN_NAME 
           FROM INFORMATION_SCHEMA.COLUMNS 
           ORDER BY TABLE_NAME, ORDINAL_POSITION;
         `;
                 const map = {};
-                const req = new tedious_1.Request(query, (err) => {
+                const req = new tedious.Request(query, (err) => {
                     if (err)
                         resolve({});
                 });
