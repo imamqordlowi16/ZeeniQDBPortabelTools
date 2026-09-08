@@ -31,9 +31,19 @@ class UpdateService {
     }
     static async hasGit() {
         return new Promise((resolve) => {
-            (0, child_process_1.execFile)('git', ['--version'], (err) => {
-                resolve(!err);
-            });
+            try {
+                (0, child_process_1.execFile)('git', ['--version'], (err, stdout) => {
+                    if (err || !stdout || !stdout.toLowerCase().includes('git version')) {
+                        resolve(false);
+                    }
+                    else {
+                        resolve(true);
+                    }
+                });
+            }
+            catch {
+                resolve(false);
+            }
         });
     }
     static compareVersions(v1, v2) {
@@ -158,7 +168,7 @@ class UpdateService {
                         available: false,
                         commitsBehind: 0,
                         currentVersion,
-                        error: `Gagal memeriksa pembaruan via HTTPS: ${e?.message || e}`,
+                        error: `Gagal akses GitHub (${e?.message || e}). Komputer tidak memiliki Git & akses GitHub terhalang firewall/proxy. Gunakan Path Remote Share lokal (misal: \\\\server\\share\\ZeenIQ).`,
                     };
                 }
             }
@@ -167,7 +177,7 @@ class UpdateService {
                     available: false,
                     commitsBehind: 0,
                     currentVersion,
-                    error: 'Git tidak terpasang dan remote bukan repositori GitHub yang valid.',
+                    error: 'Git tidak terpasang di komputer ini dan remote bukan folder share yang valid.',
                 };
             }
         }
@@ -188,6 +198,31 @@ class UpdateService {
         // Fetch dari remote git
         const fetchRes = await this.runGit(appFolder, ['fetch', trimmedRemote, this.BRANCH]);
         if (fetchRes.exitCode !== 0) {
+            // Jika git fetch gagal karena spawn git ENOENT (Git tidak terinstal / tidak ada di PATH)
+            if (fetchRes.stderr?.includes('ENOENT') || fetchRes.stdout?.includes('ENOENT')) {
+                if (ghInfo) {
+                    try {
+                        const rawUrl = `https://raw.githubusercontent.com/${ghInfo.owner}/${ghInfo.repo}/main/version.txt`;
+                        const remoteVer = await this.fetchHttpsText(rawUrl);
+                        const isNewer = this.compareVersions(remoteVer, currentVersion) > 0;
+                        return {
+                            available: isNewer,
+                            commitsBehind: isNewer ? 1 : 0,
+                            currentVersion,
+                            remoteVersion: remoteVer,
+                            changelog: isNewer ? [`Pembaruan v${remoteVer} tersedia via HTTPS`] : [],
+                            error: null,
+                        };
+                    }
+                    catch (e) { }
+                }
+                return {
+                    available: false,
+                    commitsBehind: 0,
+                    currentVersion,
+                    error: 'Git tidak terpasang di komputer ini (spawn git ENOENT). Pasang Git for Windows atau gunakan Path Remote Share lokal (misal: \\\\server\\share\\ZeenIQ).',
+                };
+            }
             // Jika git fetch gagal, coba fallback ke Git-Free HTTPS jika remote GitHub
             if (ghInfo) {
                 try {
