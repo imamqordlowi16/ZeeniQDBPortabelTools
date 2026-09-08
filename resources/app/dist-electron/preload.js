@@ -13,6 +13,13 @@ const electronAPI = {
     dropTable: (config, schemaName, tableName, purge, cascade) => electron_1.ipcRenderer.invoke('oracle:drop-table', config, schemaName, tableName, purge, cascade),
     importData: (config, options) => electron_1.ipcRenderer.invoke('oracle:import-data', config, options),
     callAiProvider: (params) => electron_1.ipcRenderer.invoke('ai:call-provider', params),
+    // Oracle DBA & Performance Monitoring
+    getExplainPlan: (config, sql) => electron_1.ipcRenderer.invoke('oracle:get-explain-plan', config, sql),
+    getActiveSessions: (config) => electron_1.ipcRenderer.invoke('oracle:get-active-sessions', config),
+    getLockInfo: (config) => electron_1.ipcRenderer.invoke('oracle:get-lock-info', config),
+    killSession: (config, sid, serialNumber) => electron_1.ipcRenderer.invoke('oracle:kill-session', config, sid, serialNumber),
+    getTablespaceUsage: (config) => electron_1.ipcRenderer.invoke('oracle:get-tablespace-usage', config),
+    getTopSql: (config) => electron_1.ipcRenderer.invoke('oracle:get-top-sql', config),
     // TXT Bundle & Bloomberg Data License Importer
     analyzeTxtBundle: (sourcePathOrFiles) => electron_1.ipcRenderer.invoke('txt-bundle:analyze', sourcePathOrFiles),
     importTxtBundle: (config, options) => electron_1.ipcRenderer.invoke('txt-bundle:import', config, options),

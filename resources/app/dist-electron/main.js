@@ -167,6 +167,25 @@ electron_1.ipcMain.handle('oracle:import-data', async (_, config, options) => {
 electron_1.ipcMain.handle('oracle:drop-table', async (_, config, schemaName, tableName, purge, cascade) => {
     return await oracleService.dropTable(config, schemaName, tableName, purge ?? true, cascade ?? false);
 });
+// ==================== DBA & PERFORMANCE MONITORING HANDLERS ====================
+electron_1.ipcMain.handle('oracle:get-explain-plan', async (_, config, sql) => {
+    return await oracleService.getExplainPlan(config, sql);
+});
+electron_1.ipcMain.handle('oracle:get-active-sessions', async (_, config) => {
+    return await oracleService.getActiveSessions(config);
+});
+electron_1.ipcMain.handle('oracle:get-lock-info', async (_, config) => {
+    return await oracleService.getLockInfo(config);
+});
+electron_1.ipcMain.handle('oracle:kill-session', async (_, config, sid, serialNumber) => {
+    return await oracleService.killSession(config, sid, serialNumber);
+});
+electron_1.ipcMain.handle('oracle:get-tablespace-usage', async (_, config) => {
+    return await oracleService.getTablespaceUsage(config);
+});
+electron_1.ipcMain.handle('oracle:get-top-sql', async (_, config) => {
+    return await oracleService.getTopSql(config);
+});
 // ==================== AI COPILOT HANDLERS ====================
 electron_1.ipcMain.handle('ai:call-provider', async (_, params) => {
     const startTime = Date.now();

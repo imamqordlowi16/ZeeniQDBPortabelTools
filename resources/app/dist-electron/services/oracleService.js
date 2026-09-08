@@ -2089,5 +2089,377 @@ class OracleService {
             }
         }
     }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // DBA & PERFORMANCE MONITORING OPERATIONS
+    // ═══════════════════════════════════════════════════════════════════════════
+    /**
+     * Explain Plan for a SQL statement
+     */
+    async getExplainPlan(config, sql) {
+        let conn = null;
+        const stmtId = `ZEENIQ_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+        try {
+            conn = await this.createConnection(config);
+            // Clean sql: remove trailing semicolons
+            const cleanedSql = sql.trim().replace(/;+$/, '');
+            // Execute EXPLAIN PLAN
+            await conn.execute(`EXPLAIN PLAN SET STATEMENT_ID = '${stmtId}' FOR ${cleanedSql}`);
+            // 1. Fetch text plan from DBMS_XPLAN
+            let rawOutput = [];
+            try {
+                const xplanRes = await conn.execute(`SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', '${stmtId}', 'ALL'))`);
+                if (xplanRes.rows) {
+                    rawOutput = xplanRes.rows.map((r) => String(r[0] ?? ''));
+                }
+            }
+            catch (xErr) {
+                rawOutput = ['Tidak dapat memuat teks dari DBMS_XPLAN.DISPLAY: ' + String(xErr)];
+            }
+            // 2. Fetch structured nodes from PLAN_TABLE
+            const nodesRes = await conn.execute(`SELECT 
+          ID, PARENT_ID, OPERATION, OPTIONS, OBJECT_OWNER, OBJECT_NAME, 
+          COST, CARDINALITY, BYTES, CPU_COST, IO_COST, TIME,
+          FILTER_PREDICATES, ACCESS_PREDICATES
+        FROM PLAN_TABLE
+        WHERE STATEMENT_ID = '${stmtId}'
+        ORDER BY ID ASC`);
+            const nodes = [];
+            let totalCost = 0;
+            let hasFullTableScan = false;
+            const fullTableScanObjects = [];
+            if (nodesRes.rows) {
+                for (const r of nodesRes.rows) {
+                    const operation = String(r[2] || '');
+                    const options = r[3] ? String(r[3]) : undefined;
+                    const objectOwner = r[4] ? String(r[4]) : undefined;
+                    const objectName = r[5] ? String(r[5]) : undefined;
+                    const cost = typeof r[6] === 'number' ? r[6] : undefined;
+                    const cardinality = typeof r[7] === 'number' ? r[7] : undefined;
+                    const bytes = typeof r[8] === 'number' ? r[8] : undefined;
+                    const cpuCost = typeof r[9] === 'number' ? r[9] : undefined;
+                    const ioCost = typeof r[10] === 'number' ? r[10] : undefined;
+                    const time = typeof r[11] === 'number' ? r[11] : undefined;
+                    const filterPredicates = r[12] ? String(r[12]) : undefined;
+                    const accessPredicates = r[13] ? String(r[13]) : undefined;
+                    const isFts = operation.toUpperCase().includes('TABLE ACCESS') && (options?.toUpperCase().includes('FULL') ?? false);
+                    if (isFts) {
+                        hasFullTableScan = true;
+                        if (objectName && !fullTableScanObjects.includes(objectName)) {
+                            fullTableScanObjects.push(objectName);
+                        }
+                    }
+                    if (r[0] === 0 && cost) {
+                        totalCost = cost;
+                    }
+                    else if (cost && cost > totalCost) {
+                        totalCost = cost;
+                    }
+                    nodes.push({
+                        id: Number(r[0]),
+                        parentId: r[1] !== null && r[1] !== undefined ? Number(r[1]) : undefined,
+                        operation,
+                        options,
+                        objectOwner,
+                        objectName,
+                        cost,
+                        cardinality,
+                        bytes,
+                        cpuCost,
+                        ioCost,
+                        time,
+                        filterPredicates,
+                        accessPredicates,
+                        isFullTableScan: isFts,
+                    });
+                }
+            }
+            // Cleanup PLAN_TABLE
+            try {
+                await conn.execute(`DELETE FROM PLAN_TABLE WHERE STATEMENT_ID = '${stmtId}'`);
+                await conn.commit();
+            }
+            catch (cleanErr) { }
+            return {
+                success: true,
+                statementId: stmtId,
+                rawOutput,
+                nodes,
+                summary: {
+                    totalCost,
+                    hasFullTableScan,
+                    fullTableScanObjects,
+                },
+            };
+        }
+        catch (err) {
+            return {
+                success: false,
+                statementId: stmtId,
+                rawOutput: [],
+                nodes: [],
+                summary: {
+                    totalCost: 0,
+                    hasFullTableScan: false,
+                    fullTableScanObjects: [],
+                },
+                error: err?.message || String(err),
+            };
+        }
+        finally {
+            if (conn) {
+                try {
+                    await conn.close();
+                }
+                catch (e) { }
+            }
+        }
+    }
+    /**
+     * Get Active Sessions and wait events
+     */
+    async getActiveSessions(config) {
+        let conn = null;
+        try {
+            conn = await this.createConnection(config);
+            const query = `
+        SELECT 
+          s.SID,
+          s.SERIAL#,
+          NVL(s.USERNAME, '[SYSTEM]') AS USERNAME,
+          s.STATUS,
+          s.OSUSER,
+          s.MACHINE,
+          s.PROGRAM,
+          s.SQL_ID,
+          SUBSTR(q.SQL_TEXT, 1, 250) AS SQL_TEXT,
+          s.BLOCKING_SESSION,
+          s.EVENT,
+          s.WAIT_CLASS,
+          s.SECONDS_IN_WAIT,
+          TO_CHAR(s.LOGON_TIME, 'YYYY-MM-DD HH24:MI:SS') AS LOGON_TIME,
+          s.MODULE
+        FROM V$SESSION s
+        LEFT JOIN V$SQL q ON s.SQL_ID = q.SQL_ID AND q.CHILD_NUMBER = 0
+        WHERE s.TYPE != 'BACKGROUND'
+        ORDER BY 
+          CASE WHEN s.STATUS = 'ACTIVE' THEN 0 ELSE 1 END,
+          s.SECONDS_IN_WAIT DESC
+      `;
+            const res = await conn.execute(query);
+            if (!res.rows)
+                return [];
+            return res.rows.map((r) => ({
+                sid: Number(r[0]),
+                serialNumber: Number(r[1]),
+                username: String(r[2] || ''),
+                status: String(r[3] || ''),
+                osUser: String(r[4] || ''),
+                machine: String(r[5] || ''),
+                program: String(r[6] || ''),
+                sqlId: r[7] ? String(r[7]) : undefined,
+                sqlText: r[8] ? String(r[8]) : undefined,
+                blockingSession: r[9] !== null && r[9] !== undefined ? Number(r[9]) : undefined,
+                event: r[10] ? String(r[10]) : undefined,
+                waitClass: r[11] ? String(r[11]) : undefined,
+                secondsInWait: typeof r[12] === 'number' ? r[12] : undefined,
+                logonTime: r[13] ? String(r[13]) : undefined,
+                module: r[14] ? String(r[14]) : undefined,
+            }));
+        }
+        catch (err) {
+            throw new Error(`Gagal mengambil data V$SESSION: ${err?.message || err}`);
+        }
+        finally {
+            if (conn) {
+                try {
+                    await conn.close();
+                }
+                catch (e) { }
+            }
+        }
+    }
+    /**
+     * Get Lock Info from V$LOCKED_OBJECT
+     */
+    async getLockInfo(config) {
+        let conn = null;
+        try {
+            conn = await this.createConnection(config);
+            const query = `
+        SELECT 
+          lo.SESSION_ID AS SESSION_SID,
+          s.SERIAL# AS SESSION_SERIAL,
+          NVL(s.USERNAME, '[UNKNOWN]') AS USERNAME,
+          o.OWNER AS OBJECT_OWNER,
+          o.OBJECT_NAME,
+          o.OBJECT_TYPE,
+          CASE lo.LOCKED_MODE
+            WHEN 0 THEN 'None'
+            WHEN 1 THEN 'Null'
+            WHEN 2 THEN 'Row-S (SS)'
+            WHEN 3 THEN 'Row-X (SX)'
+            WHEN 4 THEN 'Share'
+            WHEN 5 THEN 'S/Row-X (SRX)'
+            WHEN 6 THEN 'Exclusive'
+            ELSE TO_CHAR(lo.LOCKED_MODE)
+          END AS LOCK_MODE,
+          s.BLOCKING_SESSION,
+          CASE WHEN EXISTS (SELECT 1 FROM V$SESSION b WHERE b.BLOCKING_SESSION = lo.SESSION_ID) THEN 1 ELSE 0 END AS IS_BLOCKING
+        FROM V$LOCKED_OBJECT lo
+        JOIN ALL_OBJECTS o ON lo.OBJECT_ID = o.OBJECT_ID
+        JOIN V$SESSION s ON lo.SESSION_ID = s.SID
+        ORDER BY IS_BLOCKING DESC, s.SID ASC
+      `;
+            const res = await conn.execute(query);
+            if (!res.rows)
+                return [];
+            return res.rows.map((r) => ({
+                sessionSid: Number(r[0]),
+                sessionSerial: Number(r[1]),
+                username: String(r[2] || ''),
+                objectOwner: String(r[3] || ''),
+                objectName: String(r[4] || ''),
+                objectType: String(r[5] || ''),
+                lockMode: String(r[6] || ''),
+                blockingSid: r[7] !== null && r[7] !== undefined ? Number(r[7]) : undefined,
+                isBlocking: Boolean(r[8]),
+            }));
+        }
+        catch (err) {
+            throw new Error(`Gagal mengambil data Lock V$LOCKED_OBJECT: ${err?.message || err}`);
+        }
+        finally {
+            if (conn) {
+                try {
+                    await conn.close();
+                }
+                catch (e) { }
+            }
+        }
+    }
+    /**
+     * Kill an Oracle session (ALTER SYSTEM KILL SESSION)
+     */
+    async killSession(config, sid, serialNumber) {
+        let conn = null;
+        try {
+            conn = await this.createConnection(config);
+            await conn.execute(`ALTER SYSTEM KILL SESSION '${sid},${serialNumber}' IMMEDIATE`);
+            return { success: true, message: `Sesi Oracle SID ${sid}, SERIAL# ${serialNumber} berhasil di-kill.` };
+        }
+        catch (err) {
+            return { success: false, message: `Gagal kill session: ${err?.message || err}` };
+        }
+        finally {
+            if (conn) {
+                try {
+                    await conn.close();
+                }
+                catch (e) { }
+            }
+        }
+    }
+    /**
+     * Get Tablespace Usage
+     */
+    async getTablespaceUsage(config) {
+        let conn = null;
+        try {
+            conn = await this.createConnection(config);
+            const query = `
+        SELECT 
+          df.TABLESPACE_NAME,
+          ROUND(df.BYTES / (1024*1024), 2) AS TOTAL_MB,
+          ROUND((df.BYTES - NVL(fs.BYTES, 0)) / (1024*1024), 2) AS USED_MB,
+          ROUND(NVL(fs.BYTES, 0) / (1024*1024), 2) AS FREE_MB,
+          ROUND(((df.BYTES - NVL(fs.BYTES, 0)) / df.BYTES) * 100, 2) AS USED_PERCENT,
+          t.STATUS,
+          NVL(df.AUTOEXTENSIBLE, 'NO') AS AUTOEXTENSIBLE
+        FROM (
+          SELECT TABLESPACE_NAME, SUM(BYTES) AS BYTES, MAX(AUTOEXTENSIBLE) AS AUTOEXTENSIBLE
+          FROM DBA_DATA_FILES
+          GROUP BY TABLESPACE_NAME
+        ) df
+        LEFT JOIN (
+          SELECT TABLESPACE_NAME, SUM(BYTES) AS BYTES
+          FROM DBA_FREE_SPACE
+          GROUP BY TABLESPACE_NAME
+        ) fs ON df.TABLESPACE_NAME = fs.TABLESPACE_NAME
+        JOIN DBA_TABLESPACES t ON df.TABLESPACE_NAME = t.TABLESPACE_NAME
+        ORDER BY USED_PERCENT DESC
+      `;
+            const res = await conn.execute(query);
+            if (!res.rows)
+                return [];
+            return res.rows.map((r) => ({
+                tablespaceName: String(r[0] || ''),
+                totalMb: Number(r[1] || 0),
+                usedMb: Number(r[2] || 0),
+                freeMb: Number(r[3] || 0),
+                usedPercent: Number(r[4] || 0),
+                status: String(r[5] || 'ONLINE'),
+                autoextensible: String(r[6] || 'NO'),
+            }));
+        }
+        catch (err) {
+            throw new Error(`Gagal mengambil data Tablespace: ${err?.message || err}`);
+        }
+        finally {
+            if (conn) {
+                try {
+                    await conn.close();
+                }
+                catch (e) { }
+            }
+        }
+    }
+    /**
+     * Get Top SQL from V$SQL
+     */
+    async getTopSql(config) {
+        let conn = null;
+        try {
+            conn = await this.createConnection(config);
+            const query = `
+        SELECT * FROM (
+          SELECT 
+            SQL_ID,
+            EXECUTIONS,
+            ROUND(ELAPSED_TIME / 1000000, 2) AS ELAPSED_SECONDS,
+            ROUND(CPU_TIME / 1000000, 2) AS CPU_SECONDS,
+            DISK_READS,
+            BUFFER_GETS,
+            SUBSTR(SQL_TEXT, 1, 350) AS SQL_TEXT
+          FROM V$SQL
+          WHERE PARSING_SCHEMA_NAME NOT IN ('SYS', 'SYSTEM')
+            AND EXECUTIONS > 0
+          ORDER BY ELAPSED_TIME DESC
+        ) WHERE ROWNUM <= 30
+      `;
+            const res = await conn.execute(query);
+            if (!res.rows)
+                return [];
+            return res.rows.map((r) => ({
+                sqlId: String(r[0] || ''),
+                executions: Number(r[1] || 0),
+                elapsedSeconds: Number(r[2] || 0),
+                cpuSeconds: Number(r[3] || 0),
+                diskReads: Number(r[4] || 0),
+                bufferGets: Number(r[5] || 0),
+                sqlText: String(r[6] || ''),
+            }));
+        }
+        catch (err) {
+            throw new Error(`Gagal mengambil data V$SQL: ${err?.message || err}`);
+        }
+        finally {
+            if (conn) {
+                try {
+                    await conn.close();
+                }
+                catch (e) { }
+            }
+        }
+    }
 }
 exports.OracleService = OracleService;
