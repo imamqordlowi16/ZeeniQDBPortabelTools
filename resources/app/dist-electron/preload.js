@@ -118,6 +118,18 @@ const electronAPI = {
         electron_1.ipcRenderer.on('tools:output', listener);
         return () => electron_1.ipcRenderer.removeListener('tools:output', listener);
     },
+    // SSIS & ETL Studio
+    ssisDetectDtexec: () => electron_1.ipcRenderer.invoke('ssis:detect-dtexec'),
+    ssisScanPackages: (folderPath) => electron_1.ipcRenderer.invoke('ssis:scan-packages', folderPath),
+    ssisRunPackage: (options) => electron_1.ipcRenderer.invoke('ssis:run-package', options),
+    ssisCancelJob: (jobId) => electron_1.ipcRenderer.invoke('ssis:cancel-job', jobId),
+    onSsisLog: (callback) => {
+        const listener = (_, msg) => callback(msg);
+        electron_1.ipcRenderer.on('ssis:log', listener);
+        return () => {
+            electron_1.ipcRenderer.removeListener('ssis:log', listener);
+        };
+    },
     // Licensing & Commercial Protection
     getMachineId: () => electron_1.ipcRenderer.invoke('license:get-machine-id'),
     getActiveLicense: () => electron_1.ipcRenderer.invoke('license:get-active'),

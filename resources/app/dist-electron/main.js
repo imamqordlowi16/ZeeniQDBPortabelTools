@@ -18,6 +18,7 @@ const updateService_1 = require("./services/updateService");
 const licenseManager_1 = require("./services/licenseManager");
 const txtBundleService_1 = require("./services/txtBundleService");
 const multiDbService_1 = require("./services/multiDbService");
+const ssisService_1 = require("./services/ssisService");
 function writeLog(msg) {
     const line = `[${new Date().toISOString()}] ${msg}\n`;
     try {
@@ -48,6 +49,7 @@ let sandboxService;
 let networkService;
 let txtBundleService;
 let licenseManager;
+let ssisService;
 function initServices() {
     try {
         licenseManager = new licenseManager_1.LicenseManager();
@@ -59,6 +61,7 @@ function initServices() {
         sandboxService = new sandboxService_1.SandboxService();
         networkService = new networkService_1.NetworkService();
         txtBundleService = new txtBundleService_1.TxtBundleService(oracleService);
+        ssisService = new ssisService_1.SsisService();
         writeLog('Services initialized successfully');
     }
     catch (err) {
@@ -938,4 +941,29 @@ electron_1.ipcMain.handle('shell:open-external', (_event, url) => {
         return true;
     }
     return false;
+});
+// SSIS & ETL Studio Handlers
+electron_1.ipcMain.handle('ssis:detect-dtexec', async () => {
+    if (!ssisService)
+        ssisService = new ssisService_1.SsisService();
+    return ssisService.detectDtexec();
+});
+electron_1.ipcMain.handle('ssis:scan-packages', async (_event, folderPath) => {
+    if (!ssisService)
+        ssisService = new ssisService_1.SsisService();
+    return ssisService.scanFolder(folderPath);
+});
+electron_1.ipcMain.handle('ssis:run-package', async (_event, options) => {
+    if (!ssisService)
+        ssisService = new ssisService_1.SsisService();
+    return ssisService.executePackage(options, (msg) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('ssis:log', msg);
+        }
+    });
+});
+electron_1.ipcMain.handle('ssis:cancel-job', async (_event, jobId) => {
+    if (!ssisService)
+        return false;
+    return ssisService.cancelJob(jobId);
 });
