@@ -55,11 +55,68 @@ class SsisService {
     /**
      * Parse a single DTSX file for variables, connections, and tasks
      */
+    /**
+     * Helper to extract referenced tables and procedures from SQL string
+     */
+    extractSqlEntities(sql) {
+        const tables = new Set();
+        const procedures = new Set();
+        if (!sql || typeof sql !== 'string')
+            return { tables: [], procedures: [] };
+        // Tables in FROM / JOIN / INTO / UPDATE / TRUNCATE
+        const tablePatterns = [
+            /\b(?:FROM|JOIN)\s+([`"\[]?[\w]+[`"\]]?(?:\.[`"\[]?[\w]+[`"\]]?)*)/gi,
+            /\b(?:INSERT\s+INTO|INTO|UPDATE|TRUNCATE\s+TABLE)\s+([`"\[]?[\w]+[`"\]]?(?:\.[`"\[]?[\w]+[`"\]]?)*)/gi,
+        ];
+        for (const pat of tablePatterns) {
+            let match;
+            while ((match = pat.exec(sql)) !== null) {
+                let t = match[1]?.trim();
+                if (t && !['SELECT', 'WHERE', 'SET', 'DUAL', 'ON', 'AS', '(', ')'].includes(t.toUpperCase())) {
+                    t = t.replace(/[`"\[\]]/g, '');
+                    if (t.length > 2)
+                        tables.add(t);
+                }
+            }
+        }
+        // Stored Procedures and Function calls (e.g. EXEC sss.proc, sss.siplogging.generatejobid())
+        const procPatterns = [
+            /\b(?:EXEC|EXECUTE|CALL)\s+([`"\[]?[\w]+[`"\]]?(?:\.[`"\[]?[\w]+[`"\]]?)+)/gi,
+            /\b([a-zA-Z0-9_]+\.[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)?)\s*\(/g,
+        ];
+        const standardFunctions = new Set([
+            'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'NVL', 'ISNULL', 'COALESCE',
+            'SUBSTR', 'SUBSTRING', 'LEFT', 'RIGHT', 'YEAR', 'MONTH', 'DAY',
+            'TO_DATE', 'TO_CHAR', 'SYSDATE', 'GETDATE', 'ROUND', 'TRUNC',
+            'CAST', 'CONVERT', 'ROW_NUMBER', 'OVER', 'PARTITION',
+        ]);
+        for (const pat of procPatterns) {
+            let match;
+            while ((match = pat.exec(sql)) !== null) {
+                let p = match[1]?.trim();
+                if (p) {
+                    p = p.replace(/[`"\[\]]/g, '');
+                    const upper = p.toUpperCase();
+                    if (!standardFunctions.has(upper)) {
+                        procedures.add(p);
+                    }
+                }
+            }
+        }
+        return {
+            tables: Array.from(tables),
+            procedures: Array.from(procedures),
+        };
+    }
+    /**
+     * Parse a single DTSX file for variables, connections, tasks, queries, and tables
+     */
     parseDtsx(filePath, relativePath) {
         const stats = fs_1.default.statSync(filePath);
         const content = fs_1.default.readFileSync(filePath, 'utf8');
-        // Extract Variables (supporting DTS:, p4:, or no prefix)
+        // 1. Extract Variables
         const variables = [];
+        const varMap = {};
         const varRegex = /<DTS:Variable\b[^>]*?(?:DTS:|p\d+:)?ObjectName="([^"]+)"[^>]*>([\s\S]*?)<\/DTS:Variable>/gi;
         let varMatch;
         while ((varMatch = varRegex.exec(content)) !== null) {
@@ -80,7 +137,8 @@ class SsisService {
             if (dtMatch) {
                 dataType = dtMatch[1];
             }
-            // Filter out system variables if any
+            varMap[`${namespace}::${varName}`] = value;
+            varMap[varName] = value;
             if (namespace !== 'System') {
                 variables.push({
                     name: varName,
@@ -90,14 +148,111 @@ class SsisService {
                 });
             }
         }
-        // Extract Connections
+        // 2. Extract Connections
         const connections = new Set();
         const connRegex = /ConnectionString="([^"]+)"/g;
         let connMatch;
         while ((connMatch = connRegex.exec(content)) !== null) {
             connections.add(connMatch[1]);
         }
-        // Count tasks
+        // 3. Extract SQL Details, Tables & Procedures
+        const sqlDetails = [];
+        const allTables = new Set();
+        const allProcedures = new Set();
+        // A. Execute SQL Tasks
+        const sqlTaskRegex = /<DTS:Executable\b[^>]*ExecutableType="(?:Microsoft\.)?ExecuteSQLTask"[^>]*>([\s\S]*?)<\/DTS:Executable>/gi;
+        let stMatch;
+        let sqlTaskIdx = 1;
+        while ((stMatch = sqlTaskRegex.exec(content)) !== null) {
+            const block = stMatch[1];
+            const nameMatch = stMatch[0].match(/(?:DTS:|p\d+:)?ObjectName="([^"]+)"/i);
+            const taskName = nameMatch ? nameMatch[1] : `Execute SQL Task #${sqlTaskIdx++}`;
+            const rawSqlMatch = block.match(/SqlStatementSource="([^"]+)"/i) ||
+                block.match(/<SqlStatementSource>([\s\S]*?)<\/SqlStatementSource>/i);
+            let sql = rawSqlMatch ? rawSqlMatch[1].replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&') : '';
+            // If SQL points to a variable name like User::Log_Start, dereference it
+            if (sql.startsWith('User::') || sql.startsWith('System::') || varMap[sql]) {
+                const resolved = varMap[sql];
+                if (resolved) {
+                    sql = resolved.replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
+                }
+            }
+            if (sql && sql.trim().length > 0) {
+                const entities = this.extractSqlEntities(sql);
+                entities.tables.forEach((t) => allTables.add(t));
+                entities.procedures.forEach((p) => allProcedures.add(p));
+                sqlDetails.push({
+                    id: `sql-task-${sqlTaskIdx++}`,
+                    name: taskName,
+                    type: 'ExecuteSqlTask',
+                    sql: sql.trim(),
+                    referencedTables: entities.tables,
+                    referencedProcedures: entities.procedures,
+                });
+            }
+        }
+        // B. DataFlow Components (Source & Destination)
+        const compRegex = /<component\b[^>]*name="([^"]+)"[\s\S]*?<\/component>/gi;
+        let compMatch;
+        let compIdx = 1;
+        while ((compMatch = compRegex.exec(content)) !== null) {
+            const compName = compMatch[1];
+            const block = compMatch[0];
+            const sqlCmd = block.match(/<property[^>]*name="SqlCommand"[^>]*>([\s\S]*?)<\/property>/i);
+            const tableNameProp = block.match(/<property[^>]*name="(?:TableName|OpenRowset)"[^>]*>([\s\S]*?)<\/property>/i);
+            if (sqlCmd && sqlCmd[1].trim().length > 0) {
+                const query = sqlCmd[1].replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&').trim();
+                const entities = this.extractSqlEntities(query);
+                entities.tables.forEach((t) => allTables.add(t));
+                entities.procedures.forEach((p) => allProcedures.add(p));
+                sqlDetails.push({
+                    id: `df-src-${compIdx++}`,
+                    name: compName,
+                    type: 'DataFlowSource',
+                    sql: query,
+                    referencedTables: entities.tables,
+                    referencedProcedures: entities.procedures,
+                });
+            }
+            else if (tableNameProp && tableNameProp[1].trim().length > 0) {
+                const tbl = tableNameProp[1].replace(/[`"\[\]]/g, '').trim();
+                if (tbl && tbl !== 'none') {
+                    allTables.add(tbl);
+                    sqlDetails.push({
+                        id: `df-dest-${compIdx++}`,
+                        name: compName,
+                        type: 'DataFlowDestination',
+                        targetTable: tbl,
+                        referencedTables: [tbl],
+                        referencedProcedures: [],
+                    });
+                }
+            }
+        }
+        // C. Variables containing raw SQL expressions
+        variables.forEach((v) => {
+            const val = v.value.trim();
+            const isSql = val.startsWith('WITH ') ||
+                val.startsWith('SELECT ') ||
+                val.startsWith('INSERT ') ||
+                val.startsWith('UPDATE ') ||
+                val.startsWith('TRUNCATE ');
+            if (isSql && !sqlDetails.some((d) => d.sql === val)) {
+                const query = val.replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
+                const entities = this.extractSqlEntities(query);
+                entities.tables.forEach((t) => allTables.add(t));
+                entities.procedures.forEach((p) => allProcedures.add(p));
+                sqlDetails.push({
+                    id: `var-${v.name}`,
+                    name: `Variabel: ${v.name}`,
+                    type: 'VariableQuery',
+                    sql: query,
+                    referencedTables: entities.tables,
+                    referencedProcedures: entities.procedures,
+                });
+            }
+        });
+        // 4. Count tasks
         const dataFlowMatches = content.match(/(?:DTS:)?ExecutableType="(?:Microsoft\.)?Pipeline"/gi);
         const sqlMatches = content.match(/(?:DTS:)?ExecutableType="(?:Microsoft\.)?ExecuteSQLTask"/gi);
         return {
@@ -112,6 +267,9 @@ class SsisService {
                 dataFlow: dataFlowMatches ? dataFlowMatches.length : 0,
                 sqlTask: sqlMatches ? sqlMatches.length : 0,
             },
+            sqlDetails,
+            allTables: Array.from(allTables),
+            allProcedures: Array.from(allProcedures),
         };
     }
     /**
