@@ -308,7 +308,9 @@ class SsisService {
                 combinedInfo.includes('sql server')) {
                 dbType = 'sqlserver';
             }
-            connectionDetails.push({
+            const dtsid = (block.match(/(?:DTS:|p\d+:)?DTSID="([^"]+)"/i) || [])[1];
+            const refId = (block.match(/(?:DTS:|p\d+:)?refId="([^"]+)"/i) || [])[1];
+            const connDetail = {
                 name,
                 creationName,
                 connectionString: connStr,
@@ -323,9 +325,42 @@ class SsisService {
                 provider,
                 dbType,
                 rawParameters: Object.keys(rawParameters).length > 0 ? rawParameters : undefined,
-            });
+            };
+            connectionDetails.push(connDetail);
         }
-        // 3. Extract SQL Details, Tables & Procedures
+        // Build lookup map to match task connections back to SsisConnectionDetail
+        const connectionIdMap = {};
+        const cmBlocks = content.match(/<DTS:ConnectionManager\b[\s\S]*?<\/DTS:ConnectionManager>/gi) || [];
+        cmBlocks.forEach((block, idx) => {
+            const name = (block.match(/(?:DTS:|p\d+:)?ObjectName="([^"]+)"/i) || [])[1];
+            const dtsid = (block.match(/(?:DTS:|p\d+:)?DTSID="([^"]+)"/i) || [])[1];
+            const refId = (block.match(/(?:DTS:|p\d+:)?refId="([^"]+)"/i) || [])[1];
+            const connDetail = connectionDetails[idx];
+            if (connDetail) {
+                if (dtsid) {
+                    connectionIdMap[dtsid] = connDetail;
+                    connectionIdMap[dtsid.replace(/[{}]/g, '')] = connDetail;
+                }
+                if (refId)
+                    connectionIdMap[refId] = connDetail;
+                if (name)
+                    connectionIdMap[name] = connDetail;
+            }
+        });
+        const resolveConn = (key) => {
+            if (!key)
+                return undefined;
+            if (connectionIdMap[key])
+                return connectionIdMap[key];
+            const cleanKey = key.replace(/[{}]/g, '');
+            if (connectionIdMap[cleanKey])
+                return connectionIdMap[cleanKey];
+            const innerMatch = key.match(/\[([^\]]+)\]/);
+            if (innerMatch && connectionIdMap[innerMatch[1]])
+                return connectionIdMap[innerMatch[1]];
+            return undefined;
+        };
+        // 4. Extract SQL Details, Tables & Procedures
         const sqlDetails = [];
         const allTables = new Set();
         const allProcedures = new Set();
@@ -337,6 +372,10 @@ class SsisService {
             const block = stMatch[1];
             const nameMatch = stMatch[0].match(/(?:DTS:|p\d+:)?ObjectName="([^"]+)"/i);
             const taskName = nameMatch ? nameMatch[1] : `Execute SQL Task #${sqlTaskIdx++}`;
+            const connAttr = (block.match(/Connection="([^"]+)"/i) ||
+                stMatch[0].match(/Connection="([^"]+)"/i) ||
+                block.match(/connectionManagerID="([^"]+)"/i) || [])[1];
+            const conn = resolveConn(connAttr);
             const rawSqlMatch = block.match(/SqlStatementSource="([^"]+)"/i) ||
                 block.match(/<SqlStatementSource>([\s\S]*?)<\/SqlStatementSource>/i);
             let sql = rawSqlMatch ? rawSqlMatch[1].replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&') : '';
@@ -356,6 +395,11 @@ class SsisService {
                     name: taskName,
                     type: 'ExecuteSqlTask',
                     sql: sql.trim(),
+                    connectionName: conn?.name,
+                    database: conn?.database || conn?.dsn,
+                    host: conn?.host ? `${conn.host}${conn.port ? `:${conn.port}` : ''}` : conn?.dsn,
+                    user: conn?.user,
+                    dbType: conn?.dbType,
                     referencedTables: entities.tables,
                     referencedProcedures: entities.procedures,
                 });
@@ -368,6 +412,9 @@ class SsisService {
         while ((compMatch = compRegex.exec(content)) !== null) {
             const compName = compMatch[1];
             const block = compMatch[0];
+            const connAttr = (block.match(/connectionManagerID="([^"]+)"/i) ||
+                block.match(/connectionManagerRefId="([^"]+)"/i) || [])[1];
+            const conn = resolveConn(connAttr);
             const sqlCmd = block.match(/<property[^>]*name="SqlCommand"[^>]*>([\s\S]*?)<\/property>/i);
             const tableNameProp = block.match(/<property[^>]*name="(?:TableName|OpenRowset)"[^>]*>([\s\S]*?)<\/property>/i);
             if (sqlCmd && sqlCmd[1].trim().length > 0) {
@@ -380,12 +427,17 @@ class SsisService {
                     name: compName,
                     type: 'DataFlowSource',
                     sql: query,
+                    connectionName: conn?.name,
+                    database: conn?.database || conn?.dsn,
+                    host: conn?.host ? `${conn.host}${conn.port ? `:${conn.port}` : ''}` : conn?.dsn,
+                    user: conn?.user,
+                    dbType: conn?.dbType,
                     referencedTables: entities.tables,
                     referencedProcedures: entities.procedures,
                 });
             }
             else if (tableNameProp && tableNameProp[1].trim().length > 0) {
-                const tbl = tableNameProp[1].replace(/[`"\[\]]/g, '').trim();
+                let tbl = tableNameProp[1].replace(/[`"\[\]]/g, '').trim();
                 if (tbl && tbl !== 'none') {
                     allTables.add(tbl);
                     sqlDetails.push({
@@ -393,6 +445,11 @@ class SsisService {
                         name: compName,
                         type: 'DataFlowDestination',
                         targetTable: tbl,
+                        connectionName: conn?.name,
+                        database: conn?.database || conn?.dsn,
+                        host: conn?.host ? `${conn.host}${conn.port ? `:${conn.port}` : ''}` : conn?.dsn,
+                        user: conn?.user,
+                        dbType: conn?.dbType,
                         referencedTables: [tbl],
                         referencedProcedures: [],
                     });
@@ -422,7 +479,55 @@ class SsisService {
                 });
             }
         });
-        // 4. Count tasks
+        // 5. Build Table & Procedure Details with Origin DB
+        const tableMap = new Map();
+        const procMap = new Map();
+        for (const sqlItem of sqlDetails) {
+            if (sqlItem.targetTable) {
+                tableMap.set(sqlItem.targetTable, {
+                    name: sqlItem.targetTable,
+                    role: 'destination',
+                    connectionName: sqlItem.connectionName,
+                    database: sqlItem.database,
+                    host: sqlItem.host,
+                    user: sqlItem.user,
+                    dbType: sqlItem.dbType,
+                    taskName: sqlItem.name,
+                });
+            }
+            sqlItem.referencedTables.forEach((tbl) => {
+                if (!tableMap.has(tbl)) {
+                    const role = sqlItem.type === 'DataFlowSource' ? 'source' :
+                        sqlItem.type === 'DataFlowDestination' ? 'destination' : 'referenced';
+                    tableMap.set(tbl, {
+                        name: tbl,
+                        role,
+                        connectionName: sqlItem.connectionName,
+                        database: sqlItem.database,
+                        host: sqlItem.host,
+                        user: sqlItem.user,
+                        dbType: sqlItem.dbType,
+                        taskName: sqlItem.name,
+                    });
+                }
+            });
+            sqlItem.referencedProcedures.forEach((proc) => {
+                if (!procMap.has(proc)) {
+                    procMap.set(proc, {
+                        name: proc,
+                        connectionName: sqlItem.connectionName,
+                        database: sqlItem.database,
+                        host: sqlItem.host,
+                        user: sqlItem.user,
+                        dbType: sqlItem.dbType,
+                        taskName: sqlItem.name,
+                    });
+                }
+            });
+        }
+        const tableDetails = Array.from(tableMap.values());
+        const procedureDetails = Array.from(procMap.values());
+        // 6. Count tasks
         const dataFlowMatches = content.match(/(?:DTS:)?ExecutableType="(?:Microsoft\.)?Pipeline"/gi);
         const sqlMatches = content.match(/(?:DTS:)?ExecutableType="(?:Microsoft\.)?ExecuteSQLTask"/gi);
         return {
@@ -439,6 +544,8 @@ class SsisService {
                 sqlTask: sqlMatches ? sqlMatches.length : 0,
             },
             sqlDetails,
+            tableDetails,
+            procedureDetails,
             allTables: Array.from(allTables),
             allProcedures: Array.from(allProcedures),
         };
