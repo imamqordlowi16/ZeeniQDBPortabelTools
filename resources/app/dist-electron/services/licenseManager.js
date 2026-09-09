@@ -9,26 +9,53 @@ const crypto_1 = __importDefault(require("crypto"));
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const electron_1 = require("electron");
-// Master Keys for Developer & Core Team (VIP Edition)
-// Any key matching this list or cryptographic master hash activates permanent VIP edition
-const TEAM_VIP_MASTER_KEYS = [
-    'ZEENIQ-VIP-DEVTEAM-UNLIMITED-MASTERKEY',
-    'ZEENIQ-VIP-CORE-TEAM-2026-FOREVER',
-    'ZEENIQ-INTERNAL-FULL-UNLIMITED-ACCESS',
+// Master Key SHA-256 Hashes for Developer & Core Team (VIP Edition)
+// Keys are never stored in plaintext to prevent string extraction or reverse engineering
+const TEAM_VIP_MASTER_HASHES = [
+    '4BE15121D4C2F34A3D13F5F51EB59926846A39836EC48E9F19C85EC9D976B100',
+    'DDCABEF03C05C54DD5B22D73593404A3ACC44DDA77F51CC4E7B446CCA9941629',
+    '7FB9D0ABE085BC29000341ADCC55EA00A32255E3599A2012D6C76F6259363BA5',
 ];
 // Salt used for deterministic machine ID & signature validation
 const ZEENIQ_SALT = 'ZeenIQ_DbTools_Secured_Engine_2026_Salt_v1';
 class LicenseManager {
     licenseFilePath;
+    trialFilePath;
     cachedMachineId = null;
     constructor() {
         try {
             const userDataDir = electron_1.app?.isReady() ? electron_1.app.getPath('userData') : process.cwd();
             this.licenseFilePath = path_1.default.join(userDataDir, '.zeeniq_license.enc');
+            this.trialFilePath = path_1.default.join(userDataDir, '.zeeniq_trial.enc');
         }
         catch {
             this.licenseFilePath = path_1.default.join(process.cwd(), '.zeeniq_license.enc');
+            this.trialFilePath = path_1.default.join(process.cwd(), '.zeeniq_trial.enc');
         }
+    }
+    /**
+     * Checks if this binary is specifically built as the Commercial (Retail/Public) distribution.
+     */
+    isCommercialEdition() {
+        try {
+            if (process.env.ZEENIQ_EDITION === 'commercial')
+                return true;
+            const pkgCandidates = [
+                path_1.default.join(__dirname, '..', 'package.json'),
+                path_1.default.join(process.cwd(), 'resources', 'app.asar', 'package.json'),
+                path_1.default.join(process.cwd(), 'resources', 'app', 'package.json'),
+                path_1.default.join(process.cwd(), 'package.json'),
+            ];
+            for (const p of pkgCandidates) {
+                if (fs_1.default.existsSync(p)) {
+                    const content = JSON.parse(fs_1.default.readFileSync(p, 'utf8'));
+                    if (content.edition === 'commercial')
+                        return true;
+                }
+            }
+        }
+        catch { }
+        return false;
     }
     /**
      * Generates a stable and deterministic Machine ID bound to this computer's hardware & OS.
@@ -82,8 +109,9 @@ class LicenseManager {
         if (!trimmed) {
             return { valid: false, tier: 'community', message: 'Nomor lisensi tidak boleh kosong.' };
         }
-        // 1. Check Team VIP Master Keys (Instant Full Access for Owner & Friends)
-        if (TEAM_VIP_MASTER_KEYS.includes(trimmed)) {
+        // 1. Check Team VIP Master Keys by SHA-256 hash (never compare plaintext)
+        const keyHash = crypto_1.default.createHash('sha256').update(trimmed).digest('hex').toUpperCase();
+        if (TEAM_VIP_MASTER_HASHES.includes(keyHash)) {
             return {
                 valid: true,
                 tier: 'vip',
@@ -98,57 +126,113 @@ class LicenseManager {
                 },
             };
         }
-        // 2. Check VIP Custom Pattern (e.g. ZEENIQ-VIP-xxxx)
+        // 2. Check VIP Cryptographic Signature Pattern (e.g. ZEENIQ-VIP-[SEED]-[HMAC])
         if (trimmed.startsWith('ZEENIQ-VIP-')) {
             const hashPart = trimmed.replace('ZEENIQ-VIP-', '');
-            const expectedHash = crypto_1.default
-                .createHash('sha256')
-                .update(`ZEENIQ_VIP_SALT_${hashPart.substring(0, 6)}_${ZEENIQ_SALT}`)
-                .digest('hex')
-                .substring(0, 8)
-                .toUpperCase();
-            if (hashPart.endsWith(expectedHash) || hashPart.length >= 12) {
-                return {
-                    valid: true,
-                    tier: 'vip',
-                    message: 'Aktivasi Berhasil! Edisi ZeenIQ Team VIP aktif selamanya.',
-                    licenseInfo: {
+            if (hashPart.length >= 14) {
+                const seed = hashPart.substring(0, 6);
+                const expectedHash = crypto_1.default
+                    .createHash('sha256')
+                    .update(`ZEENIQ_VIP_SALT_${seed}_${ZEENIQ_SALT}`)
+                    .digest('hex')
+                    .substring(0, 8)
+                    .toUpperCase();
+                if (hashPart.substring(6) === expectedHash) {
+                    return {
+                        valid: true,
                         tier: 'vip',
-                        licensedTo: name || 'ZeenIQ Team Member',
-                        licenseKey: trimmed,
-                        machineId: 'GLOBAL-UNRESTRICTED',
-                        activatedAt: new Date().toISOString(),
-                        isPermanent: true,
-                    },
-                };
+                        message: 'Aktivasi Berhasil! Edisi ZeenIQ Team VIP aktif selamanya.',
+                        licenseInfo: {
+                            tier: 'vip',
+                            licensedTo: name || 'ZeenIQ Team Member',
+                            licenseKey: trimmed,
+                            machineId: 'GLOBAL-UNRESTRICTED',
+                            activatedAt: new Date().toISOString(),
+                            isPermanent: true,
+                        },
+                    };
+                }
             }
         }
-        // 3. Check Commercial Pro Key (bound to this Machine ID)
-        // Commercial format: ZPRO-[CHUNK1]-[CHUNK2]-[SIG]
-        // Example signature: HMAC-SHA256(machineId + ZEENIQ_SALT)
-        if (trimmed.startsWith('ZPRO-') || trimmed.startsWith('ZEENIQ-PRO-')) {
-            const sigHash = crypto_1.default
-                .createHmac('sha256', ZEENIQ_SALT)
+        // Helper to verify machine signature or cryptographic seed
+        const verifyMachineOrSeed = (rawKey, tierPrefix) => {
+            const sigWithName = crypto_1.default
+                .createHmac('sha256', `${ZEENIQ_SALT}_${tierPrefix}`)
                 .update(`${machineId}:${name}`)
                 .digest('hex')
                 .substring(0, 8)
                 .toUpperCase();
             const genericSig = crypto_1.default
+                .createHmac('sha256', `${ZEENIQ_SALT}_${tierPrefix}`)
+                .update(machineId)
+                .digest('hex')
+                .substring(0, 8)
+                .toUpperCase();
+            const legacySig = crypto_1.default
                 .createHmac('sha256', ZEENIQ_SALT)
                 .update(machineId)
                 .digest('hex')
                 .substring(0, 8)
                 .toUpperCase();
-            // Distinguish Subscription vs Permanent:
-            // If key contains '-SUB-' or '-MONTH-' or 'SUBSCRIPTION' -> Subscription
-            // Otherwise -> Permanent (Lifetime)
+            if (rawKey.includes(sigWithName) || rawKey.includes(genericSig) || rawKey.includes(legacySig)) {
+                return true;
+            }
+            // Check Seed-based HMAC for offline distribution e.g. [PREFIX]-[SEED6]-[HMAC8]
+            const parts = rawKey.split('-');
+            if (parts.length >= 3) {
+                const seed = parts[1];
+                if (seed && seed.length >= 6) {
+                    const expectedHmac = crypto_1.default
+                        .createHmac('sha256', ZEENIQ_SALT)
+                        .update(`${tierPrefix}_${seed}`)
+                        .digest('hex')
+                        .substring(0, 8)
+                        .toUpperCase();
+                    if (rawKey.includes(expectedHmac))
+                        return true;
+                }
+            }
+            return false;
+        };
+        // 3. Check Commercial Starter Key
+        // Format: ZSTART-[MACHINE_OR_SEED]-[SIG] or ZEENIQ-START-[...]
+        if (trimmed.startsWith('ZSTART-') || trimmed.startsWith('ZEENIQ-START-')) {
+            const isSubscription = trimmed.includes('-SUB-') || trimmed.includes('-SUB') || trimmed.includes('SUBSCRIPTION');
+            const isPermanent = !isSubscription;
+            const typeLabel = isPermanent ? 'Permanen (Lifetime)' : 'Langganan (Subscription)';
+            if (verifyMachineOrSeed(trimmed, 'STARTER')) {
+                return {
+                    valid: true,
+                    tier: 'starter',
+                    message: `Aktivasi Berhasil! Lisensi ZeenIQ Starter ${typeLabel} aktif untuk perangkat ini.`,
+                    licenseInfo: {
+                        tier: 'starter',
+                        licensedTo: name || 'Licensed Starter Customer',
+                        licenseKey: trimmed,
+                        machineId: machineId,
+                        activatedAt: new Date().toISOString(),
+                        isPermanent: isPermanent,
+                    },
+                };
+            }
+            else {
+                return {
+                    valid: false,
+                    tier: 'community',
+                    message: `Lisensi Starter ini tidak cocok dengan Machine ID perangkat ini (${machineId}).`,
+                };
+            }
+        }
+        // 4. Check Commercial Pro Key (bound to this Machine ID)
+        // Commercial format: ZPRO-[CHUNK1]-[CHUNK2]-[SIG]
+        if (trimmed.startsWith('ZPRO-') || trimmed.startsWith('ZEENIQ-PRO-')) {
             const isSubscription = trimmed.includes('-SUB-') ||
                 trimmed.includes('-SUB') ||
                 trimmed.includes('-MONTH-') ||
                 trimmed.includes('SUBSCRIPTION');
             const isPermanent = !isSubscription;
             const typeLabel = isPermanent ? 'Permanen (Lifetime)' : 'Langganan (Subscription)';
-            if (trimmed.includes(sigHash) || trimmed.includes(genericSig) || trimmed.endsWith('-PRO2026')) {
+            if (verifyMachineOrSeed(trimmed, 'PRO')) {
                 return {
                     valid: true,
                     tier: 'pro',
@@ -168,6 +252,35 @@ class LicenseManager {
                     valid: false,
                     tier: 'community',
                     message: `Lisensi Pro ini tidak cocok dengan Machine ID perangkat ini (${machineId}).`,
+                };
+            }
+        }
+        // 5. Check Commercial Advance / Enterprise Key
+        // Format: ZADV-[...] or ZEENIQ-ADV-[...] or ZEENIQ-ENTERPRISE-[...]
+        if (trimmed.startsWith('ZADV-') || trimmed.startsWith('ZEENIQ-ADV-') || trimmed.startsWith('ZEENIQ-ENTERPRISE-')) {
+            const isSubscription = trimmed.includes('-SUB-') || trimmed.includes('-SUB') || trimmed.includes('SUBSCRIPTION');
+            const isPermanent = !isSubscription;
+            const typeLabel = isPermanent ? 'Permanen (Lifetime)' : 'Langganan (Subscription)';
+            if (verifyMachineOrSeed(trimmed, 'ADVANCE')) {
+                return {
+                    valid: true,
+                    tier: 'advanced',
+                    message: `Aktivasi Berhasil! Lisensi ZeenIQ Advance Edition (Enterprise ${typeLabel}) aktif untuk perangkat ini.`,
+                    licenseInfo: {
+                        tier: 'advanced',
+                        licensedTo: name || 'Enterprise Customer',
+                        licenseKey: trimmed,
+                        machineId: machineId,
+                        activatedAt: new Date().toISOString(),
+                        isPermanent: isPermanent,
+                    },
+                };
+            }
+            else {
+                return {
+                    valid: false,
+                    tier: 'community',
+                    message: `Lisensi Advance ini tidak cocok dengan Machine ID perangkat ini (${machineId}).`,
                 };
             }
         }
@@ -205,27 +318,41 @@ class LicenseManager {
             isPermanent: false,
         };
         // 0. Check if this build is pre-baked as Team VIP Edition
-        try {
-            const candidates = [
-                path_1.default.join(__dirname, '..', '.zeeniq_vip_build'),
-                path_1.default.join(process.cwd(), '.zeeniq_vip_build'),
-                path_1.default.join(process.cwd(), 'resources', 'app', '.zeeniq_vip_build'),
-                path_1.default.join(__dirname, '.zeeniq_vip_build'),
-            ];
-            for (const c of candidates) {
-                if (fs_1.default.existsSync(c)) {
-                    return {
-                        tier: 'vip',
-                        licensedTo: 'ZeenIQ Core Team & Internal VIP',
-                        licenseKey: 'ZEENIQ-VIP-DEVTEAM-UNLIMITED-MASTERKEY',
-                        machineId: 'GLOBAL-UNRESTRICTED',
-                        isPermanent: true,
-                        activatedAt: '2026-01-01T00:00:00.000Z',
-                    };
+        // STRICT: Commercial edition NEVER allows .zeeniq_vip_build override!
+        if (!this.isCommercialEdition()) {
+            try {
+                const candidates = [
+                    path_1.default.join(__dirname, '..', '.zeeniq_vip_build'),
+                    path_1.default.join(process.cwd(), '.zeeniq_vip_build'),
+                    path_1.default.join(process.cwd(), 'resources', 'app', '.zeeniq_vip_build'),
+                    path_1.default.join(__dirname, '.zeeniq_vip_build'),
+                ];
+                const expectedSig = crypto_1.default
+                    .createHmac('sha256', ZEENIQ_SALT)
+                    .update('ZEENIQ_TEAM_VIP_INTERNAL_KEY')
+                    .digest('hex');
+                for (const c of candidates) {
+                    if (fs_1.default.existsSync(c)) {
+                        try {
+                            const raw = fs_1.default.readFileSync(c, 'utf8');
+                            const parsed = JSON.parse(raw);
+                            if (parsed.edition === 'team-vip' && parsed.signature === expectedSig) {
+                                return {
+                                    tier: 'vip',
+                                    licensedTo: parsed.licensedTo || 'ZeenIQ Core Team & Internal VIP',
+                                    licenseKey: 'ZEENIQ-VIP-ACTIVE',
+                                    machineId: 'GLOBAL-UNRESTRICTED',
+                                    isPermanent: true,
+                                    activatedAt: parsed.createdAt || '2026-01-01T00:00:00.000Z',
+                                };
+                            }
+                        }
+                        catch { }
+                    }
                 }
             }
+            catch { }
         }
-        catch { }
         try {
             if (!fs_1.default.existsSync(this.licenseFilePath)) {
                 return defaultCommunity;
@@ -272,22 +399,95 @@ class LicenseManager {
      */
     canApplyUpdates() {
         const active = this.getActiveLicense();
-        if (active.tier === 'vip') {
+        if (active.tier === 'vip' || active.tier === 'advanced') {
             return { allowed: true };
         }
-        if (active.tier === 'pro' && active.isPermanent) {
+        if ((active.tier === 'pro' || active.tier === 'starter') && active.isPermanent) {
             return { allowed: true };
         }
-        if (active.tier === 'pro' && !active.isPermanent) {
+        if (active.tier === 'pro' || active.tier === 'starter') {
             return {
                 allowed: false,
-                reason: 'Lisensi Anda adalah tipe Langganan (Subscription). Pembaruan ke versi baru hanya diizinkan untuk pemegang Lisensi Permanen (Lifetime). Silakan beli atau upgrade ke Lisensi Permanen untuk mengunduh update.',
+                reason: 'Lisensi Anda adalah tipe Langganan (Subscription). Pembaruan ke versi baru hanya diizinkan untuk pemegang Lisensi Permanen (Lifetime) atau Enterprise. Silakan upgrade ke Lisensi Permanen untuk mengunduh update.',
             };
         }
         return {
             allowed: false,
-            reason: 'Pembaruan aplikasi ke versi baru hanya tersedia untuk Lisensi Permanen (Lifetime) atau Team VIP. Silakan beli Lisensi Permanen untuk mendapatkan update berkelanjutan.',
+            reason: 'Pembaruan aplikasi ke versi baru hanya tersedia untuk Lisensi Permanen (Lifetime), Advance Edition, atau Team VIP. Silakan beli Lisensi Resmi untuk mendapatkan update berkelanjutan.',
         };
+    }
+    /**
+     * Tracks and evaluates 7-Day Demo/Community Trial period.
+     * If Demo period exceeds 7 days, isExpired is true and features require license/upgrade.
+     */
+    getTrialStatus() {
+        const activeLicense = this.getActiveLicense();
+        if (activeLicense.tier !== 'community') {
+            return {
+                isTrial: false,
+                isExpired: false,
+                daysRemaining: Infinity,
+                startedAt: activeLicense.activatedAt || new Date().toISOString(),
+                expiresAt: activeLicense.expiresAt || '',
+            };
+        }
+        const TRIAL_DAYS = 7;
+        const now = Date.now();
+        let trialData = {
+            firstLaunchAt: new Date(now).toISOString(),
+            lastSeenAt: new Date(now).toISOString(),
+        };
+        try {
+            if (fs_1.default.existsSync(this.trialFilePath)) {
+                const encrypted = fs_1.default.readFileSync(this.trialFilePath, 'utf8');
+                const decipher = crypto_1.default.createDecipheriv('aes-256-cbc', crypto_1.default.createHash('sha256').update(ZEENIQ_SALT).digest(), Buffer.alloc(16, 0));
+                let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+                decrypted += decipher.final('utf8');
+                const parsed = JSON.parse(decrypted);
+                if (parsed.firstLaunchAt) {
+                    trialData = parsed;
+                }
+            }
+            else {
+                this.saveTrialData(trialData);
+            }
+        }
+        catch {
+            this.saveTrialData(trialData);
+        }
+        const startTime = new Date(trialData.firstLaunchAt).getTime();
+        const lastSeen = new Date(trialData.lastSeenAt || trialData.firstLaunchAt).getTime();
+        // Anti-clock tampering: if clock was turned back by > 1 hour, advance or lock
+        let effectiveNow = now;
+        if (now < lastSeen - 3600000) {
+            effectiveNow = lastSeen + (lastSeen - now);
+        }
+        else {
+            trialData.lastSeenAt = new Date(now).toISOString();
+            this.saveTrialData(trialData);
+        }
+        const durationMs = effectiveNow - startTime;
+        const elapsedDays = durationMs / (1000 * 60 * 60 * 24);
+        const isExpired = elapsedDays >= TRIAL_DAYS;
+        const expiresAt = new Date(startTime + TRIAL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+        const daysRemaining = isExpired ? 0 : Math.max(1, Math.ceil(TRIAL_DAYS - elapsedDays));
+        return {
+            isTrial: true,
+            isExpired,
+            daysRemaining,
+            startedAt: trialData.firstLaunchAt,
+            expiresAt,
+        };
+    }
+    saveTrialData(data) {
+        try {
+            const raw = JSON.stringify(data);
+            const cipher = crypto_1.default.createCipheriv('aes-256-cbc', crypto_1.default.createHash('sha256').update(ZEENIQ_SALT).digest(), Buffer.alloc(16, 0));
+            let encrypted = cipher.update(raw, 'utf8', 'hex');
+            encrypted += cipher.final('hex');
+            fs_1.default.writeFileSync(this.trialFilePath, encrypted, 'utf8');
+        }
+        catch { }
     }
 }
 exports.LicenseManager = LicenseManager;

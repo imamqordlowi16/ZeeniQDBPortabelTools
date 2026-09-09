@@ -2429,6 +2429,15 @@ class OracleService {
                     }
                     rowCount++;
                     bytesWritten += Buffer.byteLength(line);
+                    // Enforce row quota limit if specified (Demo: 5,000 / Starter: 100,000)
+                    if (options.maxRows && options.maxRows > 0 && rowCount >= options.maxRows) {
+                        try {
+                            queryStream.destroy();
+                        }
+                        catch (e) { }
+                        writeStream.end(() => resolve());
+                        return;
+                    }
                     // Backpressure handling to maintain tiny memory footprint
                     const canContinue = writeStream.write(line);
                     if (!canContinue) {

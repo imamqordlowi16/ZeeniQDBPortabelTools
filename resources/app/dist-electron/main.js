@@ -935,6 +935,9 @@ electron_1.ipcMain.handle('license:can-update', () => {
         ? licenseManager.canApplyUpdates()
         : { allowed: false, reason: 'License manager not ready.' };
 });
+electron_1.ipcMain.handle('license:get-trial-status', () => {
+    return licenseManager ? licenseManager.getTrialStatus() : null;
+});
 electron_1.ipcMain.handle('shell:open-external', (_event, url) => {
     if (url && (url.startsWith('https://') || url.startsWith('http://'))) {
         electron_1.shell.openExternal(url);

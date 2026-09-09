@@ -136,6 +136,7 @@ const electronAPI = {
     activateLicense: (key, name) => electron_1.ipcRenderer.invoke('license:validate-and-activate', key, name),
     deactivateLicense: () => electron_1.ipcRenderer.invoke('license:deactivate'),
     canApplyUpdates: () => electron_1.ipcRenderer.invoke('license:can-update'),
+    getTrialStatus: () => electron_1.ipcRenderer.invoke('license:get-trial-status'),
     openExternal: (url) => electron_1.ipcRenderer.invoke('shell:open-external', url),
 };
 electron_1.contextBridge.exposeInMainWorld('electronAPI', electronAPI);
