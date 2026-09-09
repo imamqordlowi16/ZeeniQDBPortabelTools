@@ -595,8 +595,33 @@ class MultiDbService {
                 return reject(err);
             }
             const database = targetDb || config.databaseName || config.serviceName || 'master';
+            let serverHost = config.host?.trim() || 'localhost';
+            let instanceName = undefined;
+            if (serverHost.includes('\\')) {
+                const parts = serverHost.split('\\');
+                serverHost = parts[0].trim();
+                instanceName = parts[1].trim();
+            }
+            else if (serverHost.includes('/')) {
+                const parts = serverHost.split('/');
+                serverHost = parts[0].trim();
+                instanceName = parts[1].trim();
+            }
+            const optionsObj = {
+                database: database,
+                encrypt: false,
+                trustServerCertificate: true,
+                connectTimeout: 10000,
+                requestTimeout: 60000,
+            };
+            if (instanceName) {
+                optionsObj.instanceName = instanceName;
+            }
+            else {
+                optionsObj.port = Number(config.port) || 1433;
+            }
             const tediousConfig = {
-                server: config.host,
+                server: serverHost,
                 authentication: {
                     type: 'default',
                     options: {
@@ -604,14 +629,7 @@ class MultiDbService {
                         password: config.password || '',
                     },
                 },
-                options: {
-                    port: config.port || 1433,
-                    database: database,
-                    encrypt: false,
-                    trustServerCertificate: true,
-                    connectTimeout: 10000,
-                    requestTimeout: 60000,
-                },
+                options: optionsObj,
             };
             const conn = new tedious.Connection(tediousConfig);
             conn.on('connect', (err) => {

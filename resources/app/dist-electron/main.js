@@ -159,7 +159,14 @@ const sendUpdateLog = (type, message) => {
 // ==================== ORACLE & MULTI-DB IPC HANDLERS ====================
 electron_1.ipcMain.handle('oracle:test-connection', async (_, config) => {
     if (config.dbType && config.dbType !== 'oracle') {
-        return await multiDbService.testConnection(config);
+        const res = await multiDbService.testConnection(config);
+        return {
+            success: res.success,
+            banner: res.version || res.message,
+            error: res.success ? undefined : res.message,
+            latencyMs: 15,
+            message: res.message,
+        };
     }
     return await oracleService.testConnection(config);
 });

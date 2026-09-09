@@ -35,7 +35,7 @@ Get-NetIPInterface -AddressFamily IPv4 | Where-Object { $_.ConnectionState -eq "
 Write-Host "[3/4] Rute Khusus untuk IP 10.x.x.x:" -ForegroundColor Yellow
 Get-NetRoute -DestinationPrefix "10*" -AddressFamily IPv4 -ErrorAction SilentlyContinue | Format-Table DestinationPrefix, NextHop, RouteMetric, InterfaceAlias -AutoSize
 
-Write-Host "[4/4] Test Koneksi TCP Port $TargetPort ke $TargetHost:" -ForegroundColor Yellow
+Write-Host "[4/4] Test Koneksi TCP Port $TargetPort ke ${TargetHost}:" -ForegroundColor Yellow
 $tcp = Test-NetConnection -ComputerName $TargetHost -Port $TargetPort -InformationLevel Detailed
 Write-Host "  -> TcpTestSucceeded : $($tcp.TcpTestSucceeded)" -ForegroundColor $(if ($tcp.TcpTestSucceeded) { "Green" } else { "Red" })
 Write-Host "  -> SourceAddress    : $($tcp.SourceAddress)" -ForegroundColor Cyan
