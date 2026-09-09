@@ -148,12 +148,72 @@ class SsisService {
                 });
             }
         }
-        // 2. Extract Connections
+        // 2. Extract Connections & DB Information
         const connections = new Set();
-        const connRegex = /ConnectionString="([^"]+)"/g;
-        let connMatch;
-        while ((connMatch = connRegex.exec(content)) !== null) {
-            connections.add(connMatch[1]);
+        const connectionDetails = [];
+        const connMgrRegex = /<DTS:ConnectionManager\b[\s\S]*?<\/DTS:ConnectionManager>/gi;
+        let cmMatch;
+        while ((cmMatch = connMgrRegex.exec(content)) !== null) {
+            const block = cmMatch[0];
+            const name = (block.match(/(?:DTS:|p\d+:)?ObjectName="([^"]+)"/i) || [])[1] || 'Unknown Connection';
+            const connStr = (block.match(/ConnectionString="([^"]+)"/i) || [])[1] || '';
+            const creationName = (block.match(/CreationName="([^"]+)"/i) || [])[1] || 'ODBC';
+            if (connStr) {
+                connections.add(connStr);
+            }
+            let host;
+            let port;
+            let database;
+            let user;
+            let dsn;
+            let dbType = 'generic';
+            // Check if name has format host:port/service.user or ip:port/service (e.g. dc1devdbo03:1521/DEV02.SOURCE)
+            const hostPortMatch = name.match(/([a-zA-Z0-9_.-]+):(\d+)\/([a-zA-Z0-9_]+)(?:\.([a-zA-Z0-9_]+))?/i);
+            if (hostPortMatch) {
+                host = hostPortMatch[1];
+                port = parseInt(hostPortMatch[2], 10);
+                database = hostPortMatch[3];
+                if (hostPortMatch[4]) {
+                    user = hostPortMatch[4];
+                }
+            }
+            // Check DSN
+            const dsnMatch = connStr.match(/Dsn=([^;]+)/i);
+            if (dsnMatch) {
+                dsn = dsnMatch[1].trim();
+            }
+            // Check User ID / UID
+            const uidMatch = connStr.match(/(?:uid|User ID)=([^;]+)/i);
+            if (uidMatch) {
+                user = uidMatch[1].trim();
+            }
+            // Determine DB Type
+            if (port === 1521 ||
+                (database && (database.toLowerCase() === 'dev02' || database.toLowerCase() === 'prd02')) ||
+                creationName.toLowerCase().includes('ora')) {
+                dbType = 'oracle';
+            }
+            else if ((dsn && (dsn.toLowerCase().includes('impala') || dsn.toLowerCase().includes('hive'))) ||
+                name.toLowerCase().includes('impala') ||
+                name.toLowerCase().includes('hive')) {
+                dbType = 'impala';
+            }
+            else if (port === 1433 ||
+                connStr.toLowerCase().includes('initial catalog') ||
+                creationName.toLowerCase().includes('sqlncli')) {
+                dbType = 'sqlserver';
+            }
+            connectionDetails.push({
+                name,
+                creationName,
+                connectionString: connStr,
+                host,
+                port,
+                database,
+                dsn,
+                user,
+                dbType,
+            });
         }
         // 3. Extract SQL Details, Tables & Procedures
         const sqlDetails = [];
@@ -263,6 +323,7 @@ class SsisService {
             sizeFormatted: this.formatBytes(stats.size),
             variables,
             connections: Array.from(connections),
+            connectionDetails,
             tasksCount: {
                 dataFlow: dataFlowMatches ? dataFlowMatches.length : 0,
                 sqlTask: sqlMatches ? sqlMatches.length : 0,
