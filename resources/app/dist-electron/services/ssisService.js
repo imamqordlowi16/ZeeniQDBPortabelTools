@@ -148,7 +148,36 @@ class SsisService {
                 });
             }
         }
-        // 2. Extract Connections & DB Information
+        // 2. Extract Package Parameters (often contains credentials & connection strings)
+        const packageParams = {};
+        const paramRegex = /<DTS:PackageParameter\b[^>]*?(?:DTS:|p\d+:)?ObjectName="([^"]+)"[^>]*>([\s\S]*?)<\/DTS:PackageParameter>/gi;
+        let pMatch;
+        while ((pMatch = paramRegex.exec(content)) !== null) {
+            const pName = pMatch[1];
+            const pBody = pMatch[2];
+            const valMatch = pBody.match(/<(?:DTS:)?Property[^>]*?(?:DTS:)?Name="ParameterValue"[^>]*>([\s\S]*?)<\/(?:DTS:)?Property>/i);
+            if (valMatch) {
+                packageParams[pName] = valMatch[1].trim();
+            }
+        }
+        // Helper map of user/dsn to known passwords from package params
+        const credentialLookup = {};
+        for (const [pKey, pVal] of Object.entries(packageParams)) {
+            const pwdMatch = pVal.match(/(?:pwd|password)=([^;]+)/i);
+            const uidMatch = pVal.match(/(?:uid|user(?: id)?)=([^;]+)/i);
+            const dsnMatch = pVal.match(/dsn=([^;]+)/i);
+            if (pwdMatch) {
+                const pwd = pwdMatch[1].trim();
+                if (uidMatch) {
+                    credentialLookup[uidMatch[1].trim().toLowerCase()] = pwd;
+                }
+                if (dsnMatch) {
+                    credentialLookup[dsnMatch[1].trim().toLowerCase()] = pwd;
+                }
+                credentialLookup[pKey.toLowerCase()] = pwd;
+            }
+        }
+        // 3. Extract Connections & Detailed DB Information
         const connections = new Set();
         const connectionDetails = [];
         const connMgrRegex = /<DTS:ConnectionManager\b[\s\S]*?<\/DTS:ConnectionManager>/gi;
@@ -158,61 +187,142 @@ class SsisService {
             const name = (block.match(/(?:DTS:|p\d+:)?ObjectName="([^"]+)"/i) || [])[1] || 'Unknown Connection';
             const connStr = (block.match(/ConnectionString="([^"]+)"/i) || [])[1] || '';
             const creationName = (block.match(/CreationName="([^"]+)"/i) || [])[1] || 'ODBC';
-            if (connStr) {
+            // Check PropertyExpression for ConnectionString (e.g. @[$Package::Con_Hive])
+            const exprMatch = block.match(/<(?:DTS:)?PropertyExpression[^>]*?(?:DTS:|p\d+:)?Name="ConnectionString"[^>]*>([\s\S]*?)<\/DTS:PropertyExpression>/i);
+            const parameterExpression = exprMatch ? exprMatch[1].trim() : undefined;
+            let resolvedConnectionString = connStr;
+            if (parameterExpression) {
+                // Match @[$Package::ParamName] or @[User::VarName] or @[$Project::ParamName]
+                const refMatch = parameterExpression.match(/@\[(?:(?:\$Package|\$Project)::|User::)?([^\]]+)\]/i);
+                const refKey = refMatch ? refMatch[1] : parameterExpression.replace(/[@$\[\]:]/g, '');
+                if (packageParams[refKey]) {
+                    resolvedConnectionString = packageParams[refKey];
+                }
+                else if (varMap[refKey]) {
+                    resolvedConnectionString = varMap[refKey];
+                }
+            }
+            if (resolvedConnectionString) {
+                connections.add(resolvedConnectionString);
+            }
+            else if (connStr) {
                 connections.add(connStr);
             }
+            // Parse all key-value parameters from both connStr and resolvedConnectionString
+            const rawParameters = {};
+            const parseParamsInto = (str) => {
+                if (!str)
+                    return;
+                const tokens = str.split(';');
+                for (const token of tokens) {
+                    const idx = token.indexOf('=');
+                    if (idx > 0) {
+                        const k = token.substring(0, idx).trim();
+                        const v = token.substring(idx + 1).trim();
+                        if (k)
+                            rawParameters[k] = v;
+                    }
+                }
+            };
+            parseParamsInto(connStr);
+            parseParamsInto(resolvedConnectionString);
             let host;
             let port;
             let database;
             let user;
+            let password;
             let dsn;
+            let provider;
             let dbType = 'generic';
-            // Check if name has format host:port/service.user or ip:port/service (e.g. dc1devdbo03:1521/DEV02.SOURCE)
+            // 1) From parsed key-values
+            for (const [k, v] of Object.entries(rawParameters)) {
+                const lowerK = k.toLowerCase();
+                if (lowerK === 'pwd' || lowerK === 'password') {
+                    password = v;
+                }
+                else if (lowerK === 'uid' || lowerK === 'user id' || lowerK === 'user' || lowerK === 'username') {
+                    user = v;
+                }
+                else if (lowerK === 'dsn') {
+                    dsn = v;
+                }
+                else if (lowerK === 'provider') {
+                    provider = v;
+                }
+                else if (lowerK === 'data source' || lowerK === 'server' || lowerK === 'host' || lowerK === 'address') {
+                    host = v;
+                }
+                else if (lowerK === 'initial catalog' || lowerK === 'database') {
+                    database = v;
+                }
+                else if (lowerK === 'port') {
+                    port = parseInt(v, 10);
+                }
+            }
+            // 2) Parse from ObjectName (e.g. dc1devdbo03:1521/DEV02.SOURCE or 10.230.84.29:1521/dev02.SSS_SOURCE)
             const hostPortMatch = name.match(/([a-zA-Z0-9_.-]+):(\d+)\/([a-zA-Z0-9_]+)(?:\.([a-zA-Z0-9_]+))?/i);
             if (hostPortMatch) {
-                host = hostPortMatch[1];
-                port = parseInt(hostPortMatch[2], 10);
-                database = hostPortMatch[3];
-                if (hostPortMatch[4]) {
+                if (!host)
+                    host = hostPortMatch[1];
+                if (!port)
+                    port = parseInt(hostPortMatch[2], 10);
+                if (!database)
+                    database = hostPortMatch[3];
+                if (!user && hostPortMatch[4]) {
                     user = hostPortMatch[4];
                 }
             }
-            // Check DSN
-            const dsnMatch = connStr.match(/Dsn=([^;]+)/i);
-            if (dsnMatch) {
-                dsn = dsnMatch[1].trim();
+            // 3) Fallback password resolution from cross-referenced credentials
+            if (!password) {
+                if (user && credentialLookup[user.toLowerCase()]) {
+                    password = credentialLookup[user.toLowerCase()];
+                }
+                else if (dsn && credentialLookup[dsn.toLowerCase()]) {
+                    password = credentialLookup[dsn.toLowerCase()];
+                }
+                else if (parameterExpression) {
+                    const cleanRef = parameterExpression.replace(/[@$\[\]:]/g, '').toLowerCase();
+                    if (credentialLookup[cleanRef]) {
+                        password = credentialLookup[cleanRef];
+                    }
+                }
             }
-            // Check User ID / UID
-            const uidMatch = connStr.match(/(?:uid|User ID)=([^;]+)/i);
-            if (uidMatch) {
-                user = uidMatch[1].trim();
-            }
-            // Determine DB Type
+            // 4) Determine DB Type
+            const combinedInfo = `${name} ${connStr} ${resolvedConnectionString} ${creationName} ${dsn || ''}`.toLowerCase();
             if (port === 1521 ||
                 (database && (database.toLowerCase() === 'dev02' || database.toLowerCase() === 'prd02')) ||
-                creationName.toLowerCase().includes('ora')) {
+                combinedInfo.includes('ora') ||
+                combinedInfo.includes('1521') ||
+                combinedInfo.includes('sss_dev') ||
+                combinedInfo.includes('sss_source')) {
                 dbType = 'oracle';
             }
-            else if ((dsn && (dsn.toLowerCase().includes('impala') || dsn.toLowerCase().includes('hive'))) ||
-                name.toLowerCase().includes('impala') ||
-                name.toLowerCase().includes('hive')) {
+            else if (combinedInfo.includes('impala') ||
+                combinedInfo.includes('hive') ||
+                (dsn && (dsn.toLowerCase().includes('impala') || dsn.toLowerCase().includes('hive')))) {
                 dbType = 'impala';
             }
             else if (port === 1433 ||
-                connStr.toLowerCase().includes('initial catalog') ||
-                creationName.toLowerCase().includes('sqlncli')) {
+                combinedInfo.includes('initial catalog') ||
+                combinedInfo.includes('sqlncli') ||
+                combinedInfo.includes('sql server')) {
                 dbType = 'sqlserver';
             }
             connectionDetails.push({
                 name,
                 creationName,
                 connectionString: connStr,
+                parameterExpression,
+                resolvedConnectionString,
                 host,
                 port,
                 database,
                 dsn,
                 user,
+                password,
+                provider,
                 dbType,
+                rawParameters: Object.keys(rawParameters).length > 0 ? rawParameters : undefined,
             });
         }
         // 3. Extract SQL Details, Tables & Procedures
