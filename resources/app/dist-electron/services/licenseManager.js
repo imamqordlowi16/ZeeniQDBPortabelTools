@@ -27,13 +27,40 @@ class LicenseManager {
     cachedMachineId = null;
     constructor() {
         try {
+            const isCommercial = this.isCommercialEdition();
+            const licenseFileName = isCommercial ? '.zeeniq_license_commercial.enc' : '.zeeniq_license.enc';
+            const trialFileName = isCommercial ? '.zeeniq_trial_commercial.enc' : '.zeeniq_trial.enc';
+            // If running as packaged portable, isolate license to the portable data directory
+            if (electron_1.app && electron_1.app.isPackaged) {
+                const exeDir = path_1.default.dirname(process.execPath);
+                const exeDataDir = path_1.default.join(exeDir, 'data');
+                if (isCommercial) {
+                    if (!fs_1.default.existsSync(exeDataDir)) {
+                        try {
+                            fs_1.default.mkdirSync(exeDataDir, { recursive: true });
+                        }
+                        catch (e) { }
+                    }
+                    this.licenseFilePath = path_1.default.join(exeDataDir, licenseFileName);
+                    this.trialFilePath = path_1.default.join(exeDataDir, trialFileName);
+                    return;
+                }
+                else if (fs_1.default.existsSync(exeDataDir)) {
+                    this.licenseFilePath = path_1.default.join(exeDataDir, licenseFileName);
+                    this.trialFilePath = path_1.default.join(exeDataDir, trialFileName);
+                    return;
+                }
+            }
             const userDataDir = electron_1.app?.isReady() ? electron_1.app.getPath('userData') : process.cwd();
-            this.licenseFilePath = path_1.default.join(userDataDir, '.zeeniq_license.enc');
-            this.trialFilePath = path_1.default.join(userDataDir, '.zeeniq_trial.enc');
+            this.licenseFilePath = path_1.default.join(userDataDir, licenseFileName);
+            this.trialFilePath = path_1.default.join(userDataDir, trialFileName);
         }
         catch {
-            this.licenseFilePath = path_1.default.join(process.cwd(), '.zeeniq_license.enc');
-            this.trialFilePath = path_1.default.join(process.cwd(), '.zeeniq_trial.enc');
+            const isCommercial = this.isCommercialEdition();
+            const licenseFileName = isCommercial ? '.zeeniq_license_commercial.enc' : '.zeeniq_license.enc';
+            const trialFileName = isCommercial ? '.zeeniq_trial_commercial.enc' : '.zeeniq_trial.enc';
+            this.licenseFilePath = path_1.default.join(process.cwd(), licenseFileName);
+            this.trialFilePath = path_1.default.join(process.cwd(), trialFileName);
         }
     }
     /**
@@ -43,6 +70,31 @@ class LicenseManager {
         try {
             if (process.env.ZEENIQ_EDITION === 'commercial')
                 return true;
+            if (process.env.ZEENIQ_EDITION === 'team' || process.env.ZEENIQ_EDITION === 'vip')
+                return false;
+            if (electron_1.app) {
+                const exeName = path_1.default.basename(process.execPath).toLowerCase();
+                if (exeName.includes('vip'))
+                    return false;
+                if (exeName === 'zeeniq-oracle-tools.exe') {
+                    const exeDir = path_1.default.dirname(process.execPath).toLowerCase();
+                    if (exeDir.includes('commercial'))
+                        return true;
+                }
+                try {
+                    if (electron_1.app.isReady() || electron_1.app.getAppPath) {
+                        const appPkgPath = path_1.default.join(electron_1.app.getAppPath(), 'package.json');
+                        if (fs_1.default.existsSync(appPkgPath)) {
+                            const content = JSON.parse(fs_1.default.readFileSync(appPkgPath, 'utf8'));
+                            if (content.edition === 'commercial')
+                                return true;
+                            if (content.edition === 'team' || content.edition === 'vip')
+                                return false;
+                        }
+                    }
+                }
+                catch { }
+            }
             const pkgCandidates = [
                 path_1.default.join(__dirname, '..', 'package.json'),
                 path_1.default.join(process.cwd(), 'resources', 'app.asar', 'package.json'),
@@ -54,6 +106,8 @@ class LicenseManager {
                     const content = JSON.parse(fs_1.default.readFileSync(p, 'utf8'));
                     if (content.edition === 'commercial')
                         return true;
+                    if (content.edition === 'team' || content.edition === 'vip')
+                        return false;
                 }
             }
         }
@@ -114,6 +168,18 @@ class LicenseManager {
         }
         // 1. Check Team VIP Master Keys by SHA-256 hash (never compare plaintext)
         const keyHash = crypto_1.default.createHash('sha256').update(trimmed).digest('hex').toUpperCase();
+        // STRICT: Commercial edition NEVER allows Team VIP keys!
+        if (this.isCommercialEdition()) {
+            const isVipMaster = TEAM_VIP_MASTER_HASHES.includes(keyHash);
+            const isVipFormat = trimmed.startsWith('ZEENIQ-VIP-') || trimmed.includes('VIP') || trimmed.includes('MASTER');
+            if (isVipMaster || isVipFormat) {
+                return {
+                    valid: false,
+                    tier: 'community',
+                    message: 'Lisensi Team VIP khusus untuk ZeenIQ DbTools Team Edition dan tidak dapat digunakan pada Commercial Edition.',
+                };
+            }
+        }
         if (TEAM_VIP_MASTER_HASHES.includes(keyHash)) {
             return {
                 valid: true,
@@ -368,6 +434,9 @@ class LicenseManager {
             // Re-validate against current machine
             const val = this.validateKey(parsed.licenseKey, parsed.licensedTo);
             if (val.valid) {
+                if (this.isCommercialEdition() && val.tier === 'vip') {
+                    return defaultCommunity;
+                }
                 return {
                     ...parsed,
                     tier: val.tier,
