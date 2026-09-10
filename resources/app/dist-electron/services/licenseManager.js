@@ -8,6 +8,7 @@ const os_1 = __importDefault(require("os"));
 const crypto_1 = __importDefault(require("crypto"));
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
+const child_process_1 = require("child_process");
 const electron_1 = require("electron");
 // Master Key SHA-256 Hashes for Developer & Core Team (VIP Edition)
 // Keys are never stored in plaintext to prevent string extraction or reverse engineering
@@ -417,8 +418,9 @@ class LicenseManager {
         };
     }
     /**
-     * Tracks and evaluates 7-Day Demo/Community Trial period.
-     * If Demo period exceeds 7 days, isExpired is true and features require license/upgrade.
+     * Tracks and evaluates 7-Day Demo/Community Trial period with multi-layer hardware anchoring.
+     * Prevents repeated trial abuse by storing encrypted trial fingerprints across AppData,
+     * LocalAppData, UserProfile, and Windows Registry.
      */
     getTrialStatus() {
         const activeLicense = this.getActiveLicense();
@@ -433,59 +435,178 @@ class LicenseManager {
         }
         const TRIAL_DAYS = 7;
         const now = Date.now();
-        let trialData = {
-            firstLaunchAt: new Date(now).toISOString(),
-            lastSeenAt: new Date(now).toISOString(),
-        };
+        const machineId = this.getMachineId();
+        // 1. Gather trial records from all redundant storage layers
+        const discoveredRecords = [];
+        // Layer A: Primary AppData
+        const recA = this.readTrialFile(this.trialFilePath);
+        if (recA)
+            discoveredRecords.push(recA);
+        // Layer B: LocalAppData
         try {
-            if (fs_1.default.existsSync(this.trialFilePath)) {
-                const encrypted = fs_1.default.readFileSync(this.trialFilePath, 'utf8');
-                const decipher = crypto_1.default.createDecipheriv('aes-256-cbc', crypto_1.default.createHash('sha256').update(ZEENIQ_SALT).digest(), Buffer.alloc(16, 0));
-                let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-                decrypted += decipher.final('utf8');
-                const parsed = JSON.parse(decrypted);
-                if (parsed.firstLaunchAt) {
-                    trialData = parsed;
+            const localApp = process.env.LOCALAPPDATA || os_1.default.homedir();
+            const recB = this.readTrialFile(path_1.default.join(localApp, '.zeeniq_cache_id.enc'));
+            if (recB)
+                discoveredRecords.push(recB);
+        }
+        catch { }
+        // Layer C: UserProfile Home Directory
+        try {
+            const recC = this.readTrialFile(path_1.default.join(os_1.default.homedir(), '.zeeniq_device_state'));
+            if (recC)
+                discoveredRecords.push(recC);
+        }
+        catch { }
+        // Layer D: Windows Registry Hive (HKCU\Software\ZeenIQ\Core\TrialToken)
+        const recD = this.readRegistryTrial();
+        if (recD)
+            discoveredRecords.push(recD);
+        let firstLaunchAt;
+        let lastSeenAt;
+        let hadExpiredFlag = false;
+        if (discoveredRecords.length > 0) {
+            // Find the absolute EARLIEST firstLaunchAt to prevent reset by deleting folders
+            let earliestTime = Infinity;
+            let earliestStr = discoveredRecords[0].firstLaunchAt;
+            let latestSeen = 0;
+            let latestSeenStr = discoveredRecords[0].lastSeenAt || earliestStr;
+            for (const rec of discoveredRecords) {
+                if (rec.isExpired)
+                    hadExpiredFlag = true;
+                const tStart = new Date(rec.firstLaunchAt).getTime();
+                if (!isNaN(tStart) && tStart < earliestTime) {
+                    earliestTime = tStart;
+                    earliestStr = rec.firstLaunchAt;
+                }
+                const tSeen = new Date(rec.lastSeenAt || rec.firstLaunchAt).getTime();
+                if (!isNaN(tSeen) && tSeen > latestSeen) {
+                    latestSeen = tSeen;
+                    latestSeenStr = rec.lastSeenAt || rec.firstLaunchAt;
                 }
             }
-            else {
-                this.saveTrialData(trialData);
-            }
+            firstLaunchAt = earliestStr;
+            lastSeenAt = latestSeenStr;
         }
-        catch {
-            this.saveTrialData(trialData);
+        else {
+            // Genuine first launch on this computer!
+            const initialIso = new Date(now).toISOString();
+            firstLaunchAt = initialIso;
+            lastSeenAt = initialIso;
         }
-        const startTime = new Date(trialData.firstLaunchAt).getTime();
-        const lastSeen = new Date(trialData.lastSeenAt || trialData.firstLaunchAt).getTime();
-        // Anti-clock tampering: if clock was turned back by > 1 hour, advance or lock
+        const startTime = new Date(firstLaunchAt).getTime();
+        const lastSeen = new Date(lastSeenAt).getTime();
+        // Anti-clock tampering: if clock was turned back by > 1 hour, advance effective time
         let effectiveNow = now;
         if (now < lastSeen - 3600000) {
             effectiveNow = lastSeen + (lastSeen - now);
         }
-        else {
-            trialData.lastSeenAt = new Date(now).toISOString();
-            this.saveTrialData(trialData);
-        }
         const durationMs = effectiveNow - startTime;
         const elapsedDays = durationMs / (1000 * 60 * 60 * 24);
-        const isExpired = elapsedDays >= TRIAL_DAYS;
+        const isExpired = hadExpiredFlag || elapsedDays >= TRIAL_DAYS;
         const expiresAt = new Date(startTime + TRIAL_DAYS * 24 * 60 * 60 * 1000).toISOString();
         const daysRemaining = isExpired ? 0 : Math.max(1, Math.ceil(TRIAL_DAYS - elapsedDays));
+        // Save consolidated record back to ALL storage layers to self-heal any wiped locations
+        const consolidatedData = {
+            machineId,
+            firstLaunchAt,
+            lastSeenAt: new Date(effectiveNow).toISOString(),
+            isExpired,
+        };
+        this.saveConsolidatedTrial(consolidatedData);
         return {
             isTrial: true,
             isExpired,
             daysRemaining,
-            startedAt: trialData.firstLaunchAt,
+            startedAt: firstLaunchAt,
             expiresAt,
         };
     }
-    saveTrialData(data) {
+    encryptTrialPayload(data) {
+        const raw = JSON.stringify(data);
+        const cipher = crypto_1.default.createCipheriv('aes-256-cbc', crypto_1.default.createHash('sha256').update(ZEENIQ_SALT).digest(), Buffer.alloc(16, 0));
+        let encrypted = cipher.update(raw, 'utf8', 'hex');
+        encrypted += cipher.final('hex');
+        return encrypted;
+    }
+    decryptTrialPayload(encrypted) {
         try {
-            const raw = JSON.stringify(data);
-            const cipher = crypto_1.default.createCipheriv('aes-256-cbc', crypto_1.default.createHash('sha256').update(ZEENIQ_SALT).digest(), Buffer.alloc(16, 0));
-            let encrypted = cipher.update(raw, 'utf8', 'hex');
-            encrypted += cipher.final('hex');
-            fs_1.default.writeFileSync(this.trialFilePath, encrypted, 'utf8');
+            const decipher = crypto_1.default.createDecipheriv('aes-256-cbc', crypto_1.default.createHash('sha256').update(ZEENIQ_SALT).digest(), Buffer.alloc(16, 0));
+            let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+            decrypted += decipher.final('utf8');
+            const parsed = JSON.parse(decrypted);
+            if (parsed && parsed.firstLaunchAt) {
+                return parsed;
+            }
+            return null;
+        }
+        catch {
+            return null;
+        }
+    }
+    readTrialFile(filePath) {
+        try {
+            if (fs_1.default.existsSync(filePath)) {
+                const encrypted = fs_1.default.readFileSync(filePath, 'utf8').trim();
+                return this.decryptTrialPayload(encrypted);
+            }
+        }
+        catch { }
+        return null;
+    }
+    writeTrialFile(filePath, ciphertext) {
+        try {
+            const dir = path_1.default.dirname(filePath);
+            if (!fs_1.default.existsSync(dir)) {
+                fs_1.default.mkdirSync(dir, { recursive: true });
+            }
+            fs_1.default.writeFileSync(filePath, ciphertext, 'utf8');
+        }
+        catch { }
+    }
+    readRegistryTrial() {
+        if (process.platform !== 'win32')
+            return null;
+        try {
+            const out = (0, child_process_1.execSync)('reg query "HKCU\\Software\\ZeenIQ\\Core" /v "TrialToken"', {
+                encoding: 'utf8',
+                stdio: ['ignore', 'pipe', 'ignore'],
+            });
+            const match = out.match(/TrialToken\s+REG_SZ\s+(\S+)/);
+            if (match && match[1]) {
+                return this.decryptTrialPayload(match[1]);
+            }
+        }
+        catch { }
+        return null;
+    }
+    writeRegistryTrial(ciphertext) {
+        if (process.platform !== 'win32')
+            return;
+        try {
+            (0, child_process_1.execSync)(`reg add "HKCU\\Software\\ZeenIQ\\Core" /v "TrialToken" /t REG_SZ /d "${ciphertext}" /f`, {
+                stdio: 'ignore',
+            });
+        }
+        catch { }
+    }
+    saveConsolidatedTrial(data) {
+        try {
+            const ciphertext = this.encryptTrialPayload(data);
+            // Layer A: AppData
+            this.writeTrialFile(this.trialFilePath, ciphertext);
+            // Layer B: LocalAppData
+            try {
+                const localApp = process.env.LOCALAPPDATA || os_1.default.homedir();
+                this.writeTrialFile(path_1.default.join(localApp, '.zeeniq_cache_id.enc'), ciphertext);
+            }
+            catch { }
+            // Layer C: UserProfile
+            try {
+                this.writeTrialFile(path_1.default.join(os_1.default.homedir(), '.zeeniq_device_state'), ciphertext);
+            }
+            catch { }
+            // Layer D: Windows Registry
+            this.writeRegistryTrial(ciphertext);
         }
         catch { }
     }

@@ -17,24 +17,26 @@ if not exist "%TARGET_EXE%" (
 )
 
 echo Membuat Shortcut di Desktop dan Start Menu...
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ws = New-Object -ComObject WScript.Shell; " ^
-  "$desk = [Environment]::GetFolderPath('Desktop'); " ^
-  "$scDesk = $ws.CreateShortcut((Join-Path $desk 'ZeenIQ Oracle Tools.lnk')); " ^
-  "$scDesk.TargetPath = '%TARGET_EXE%'; " ^
-  "$scDesk.WorkingDirectory = '%TARGET_DIR%'; " ^
-  "$scDesk.Description = 'ZeenIQ Oracle & DB Backup Tools'; " ^
-  "$scDesk.IconLocation = '%TARGET_EXE%,0'; " ^
-  "$scDesk.Save(); " ^
-  "$sm = [Environment]::GetFolderPath('Programs'); " ^
-  "$scSm = $ws.CreateShortcut((Join-Path $sm 'ZeenIQ Oracle Tools.lnk')); " ^
-  "$scSm.TargetPath = '%TARGET_EXE%'; " ^
-  "$scSm.WorkingDirectory = '%TARGET_DIR%'; " ^
-  "$scSm.Description = 'ZeenIQ Oracle & DB Backup Tools'; " ^
-  "$scSm.IconLocation = '%TARGET_EXE%,0'; " ^
-  "$scSm.Save(); "
+(
+  echo Set oWS = WScript.CreateObject("WScript.Shell"^)
+  echo sDesk = oWS.SpecialFolders("Desktop"^)
+  echo Set oLink = oWS.CreateShortcut(sDesk ^& "\ZeenIQ Oracle Tools.lnk"^)
+  echo oLink.TargetPath = "%TARGET_EXE%"
+  echo oLink.WorkingDirectory = "%TARGET_DIR%"
+  echo oLink.Description = "ZeenIQ Oracle & DB Backup Tools"
+  echo oLink.Save
+  echo sProgs = oWS.SpecialFolders("Programs"^)
+  echo Set oLink2 = oWS.CreateShortcut(sProgs ^& "\ZeenIQ Oracle Tools.lnk"^)
+  echo oLink2.TargetPath = "%TARGET_EXE%"
+  echo oLink2.WorkingDirectory = "%TARGET_DIR%"
+  echo oLink2.Description = "ZeenIQ Oracle & DB Backup Tools"
+  echo oLink2.Save
+) > "%TEMP%\_znq_sc.vbs"
+cscript //nologo "%TEMP%\_znq_sc.vbs"
+set SC_ERR=%ERRORLEVEL%
+del "%TEMP%\_znq_sc.vbs" >nul 2>&1
 
-if %errorlevel% equ 0 (
+if %SC_ERR% equ 0 (
     echo.
     echo ============================================================
     echo [SUKSES] Shortcut berhasil dibuat!
