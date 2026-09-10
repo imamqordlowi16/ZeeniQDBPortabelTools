@@ -39,8 +39,30 @@ class StorageService {
             process.cwd().toLowerCase().includes('wdagutilityaccount') ||
             (electron_1.app && process.execPath.toLowerCase().includes('wdagutilityaccount')));
     }
+    isCommercialEdition() {
+        try {
+            if (process.env.ZEENIQ_EDITION === 'commercial')
+                return true;
+            const pkgCandidates = [
+                path_1.default.join(__dirname, '..', 'package.json'),
+                path_1.default.join(process.cwd(), 'resources', 'app.asar', 'package.json'),
+                path_1.default.join(process.cwd(), 'resources', 'app', 'package.json'),
+                path_1.default.join(process.cwd(), 'package.json'),
+            ];
+            for (const p of pkgCandidates) {
+                if (fs_1.default.existsSync(p)) {
+                    const content = JSON.parse(fs_1.default.readFileSync(p, 'utf8'));
+                    if (content.edition === 'commercial')
+                        return true;
+                }
+            }
+        }
+        catch { }
+        return false;
+    }
     resolveDataDirectory() {
         const isSandbox = this.isRunningInSandbox();
+        const isCommercial = this.isCommercialEdition();
         // 1. If running inside Windows Sandbox, ALWAYS write to the mapped portable data folder!
         if (isSandbox) {
             const execDir = electron_1.app ? path_1.default.dirname(process.execPath) : process.cwd();
@@ -60,6 +82,17 @@ class StorageService {
         if (electron_1.app && electron_1.app.isPackaged) {
             const exeDir = path_1.default.dirname(process.execPath);
             const exeDataDir = path_1.default.join(exeDir, 'data');
+            if (isCommercial) {
+                // STRICT: Commercial portable edition ALWAYS uses its own isolated local data directory
+                if (!fs_1.default.existsSync(exeDataDir)) {
+                    try {
+                        fs_1.default.mkdirSync(exeDataDir, { recursive: true });
+                    }
+                    catch (e) { }
+                }
+                this.portableDataDir = exeDataDir;
+                return exeDataDir;
+            }
             if (fs_1.default.existsSync(exeDataDir)) {
                 this.portableDataDir = exeDataDir;
                 return exeDataDir;
@@ -68,10 +101,11 @@ class StorageService {
         // 3. Host dev / standard location
         const appRoot = path_1.default.resolve(__dirname, '..', '..');
         const repoPortableDataDir = path_1.default.join(appRoot, 'ZeenIQ-Oracle-Tools-Portable', 'data');
-        if (fs_1.default.existsSync(path_1.default.join(appRoot, 'ZeenIQ-Oracle-Tools-Portable'))) {
+        if (!isCommercial && fs_1.default.existsSync(path_1.default.join(appRoot, 'ZeenIQ-Oracle-Tools-Portable'))) {
             this.portableDataDir = repoPortableDataDir;
         }
-        const hostDir = electron_1.app ? path_1.default.join(electron_1.app.getPath('userData'), 'zeeniq_oracle_data') : path_1.default.join(process.cwd(), '.data');
+        const hostDirName = isCommercial ? 'zeeniq_commercial_data' : 'zeeniq_oracle_data';
+        const hostDir = electron_1.app ? path_1.default.join(electron_1.app.getPath('userData'), hostDirName) : path_1.default.join(process.cwd(), isCommercial ? '.data_commercial' : '.data');
         return hostDir;
     }
     syncToPortable(filename, content) {
@@ -86,20 +120,31 @@ class StorageService {
         }
     }
     initializeDefaults() {
-        // If portable data directory exists and has connections, import them if host connections missing
-        if (this.portableDataDir && fs_1.default.existsSync(path_1.default.join(this.portableDataDir, 'connections.json'))) {
+        const isCommercial = this.isCommercialEdition();
+        if (isCommercial) {
+            // STRICT: In Commercial edition, connections must ALWAYS be empty by default!
+            // Do NOT import any pre-existing internal connections!
             if (!fs_1.default.existsSync(this.connectionsFile)) {
-                try {
-                    fs_1.default.copyFileSync(path_1.default.join(this.portableDataDir, 'connections.json'), this.connectionsFile);
-                }
-                catch (e) { }
+                fs_1.default.writeFileSync(this.connectionsFile, '[]\n', 'utf-8');
+                this.syncToPortable('connections.json', '[]\n');
             }
         }
-        if (!fs_1.default.existsSync(this.connectionsFile)) {
-            const defaultConnections = [];
-            const jsonStr = JSON.stringify(defaultConnections, null, 2);
-            fs_1.default.writeFileSync(this.connectionsFile, jsonStr, 'utf-8');
-            this.syncToPortable('connections.json', jsonStr);
+        else {
+            // Team VIP / Internal edition: import from portable directory if available
+            if (this.portableDataDir && fs_1.default.existsSync(path_1.default.join(this.portableDataDir, 'connections.json'))) {
+                if (!fs_1.default.existsSync(this.connectionsFile)) {
+                    try {
+                        fs_1.default.copyFileSync(path_1.default.join(this.portableDataDir, 'connections.json'), this.connectionsFile);
+                    }
+                    catch (e) { }
+                }
+            }
+            if (!fs_1.default.existsSync(this.connectionsFile)) {
+                const defaultConnections = [];
+                const jsonStr = JSON.stringify(defaultConnections, null, 2);
+                fs_1.default.writeFileSync(this.connectionsFile, jsonStr, 'utf-8');
+                this.syncToPortable('connections.json', jsonStr);
+            }
         }
         if (!fs_1.default.existsSync(this.historyFile)) {
             fs_1.default.writeFileSync(this.historyFile, JSON.stringify([], null, 2), 'utf-8');
