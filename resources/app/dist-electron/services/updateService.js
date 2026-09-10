@@ -275,12 +275,16 @@ class UpdateService {
             }
         }
         catch (e) { }
+        const isNewer = remoteVersion ? this.compareVersions(remoteVersion, currentVersion) > 0 : false;
+        // JIKA versi remote sama atau lebih rendah dari versi terpasang, aplikasi SUDAH MUTAKHIR (up to date).
+        // Jangan tampilkan update banner hanya karena ada perbedaan commit di repo.
+        const isUpdateAvailable = isNewer || (!remoteVersion && commitsBehind > 0);
         return {
-            available: commitsBehind > 0 || (remoteVersion ? this.compareVersions(remoteVersion, currentVersion) > 0 : false),
-            commitsBehind: Math.max(commitsBehind, remoteVersion && this.compareVersions(remoteVersion, currentVersion) > 0 ? 1 : 0),
+            available: isUpdateAvailable,
+            commitsBehind: isUpdateAvailable ? Math.max(commitsBehind, isNewer ? 1 : 0) : 0,
             currentVersion,
             remoteVersion,
-            changelog,
+            changelog: isUpdateAvailable ? changelog : [],
             error: null,
         };
     }
@@ -509,6 +513,7 @@ if %errorlevel% neq 0 (
   powershell -NoProfile -ExecutionPolicy Bypass -Command "[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}; $zip = Join-Path $env:TEMP 'zeeniq_up.zip'; $dir = Join-Path $env:TEMP 'zeeniq_up'; Remove-Item -Force -Recurse $dir -ErrorAction SilentlyContinue; Invoke-WebRequest -Uri 'https://codeload.github.com/imamqordlowi16/ZeeniQDBPortabelTools/zip/refs/heads/main' -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $dir -Force; $src = (Get-ChildItem -Path $dir | Select-Object -First 1).FullName; robocopy $src '%DEST%' /E /XD zeeniq_oracle_data Data logs temp /NFL /NDL; Remove-Item -Force $zip; Remove-Item -Force -Recurse $dir;"
 ) else (
   cd /d "%DEST%"
+  if exist ".git\\index.lock" del /f /q ".git\\index.lock" >nul 2>nul
   if not exist ".git" (
     git init -b main
     git remote add origin "%REMOTE%"
@@ -525,8 +530,12 @@ set PID=${pid}
 set REMOTE=${remote}
 set DEST=${appFolder}
 
-:: Tunggu proses utama keluar
+:: Pastikan proses utama dan child-nya sudah benar-benar tertutup
+taskkill /F /PID %PID% >nul 2>nul
+taskkill /F /IM ${exeName} >nul 2>nul
 timeout /t 2 /nobreak >nul
+
+if exist "%DEST%\\.git\\index.lock" del /f /q "%DEST%\\.git\\index.lock" >nul 2>nul
 
 ${updateCommands}
 
