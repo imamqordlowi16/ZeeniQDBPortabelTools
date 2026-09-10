@@ -195,6 +195,20 @@ electron_1.ipcMain.handle('oracle:get-schema-table-columns', async (_, config, s
     }
     return await oracleService.getSchemaTableColumns(config, schemaName);
 });
+electron_1.ipcMain.handle('schema:get-detailed-columns', async (_, config, schemaName) => {
+    try {
+        const map = await multiDbService.getDetailedColumns(config, schemaName, oracleService);
+        const result = {};
+        for (const [tbl, cols] of map.entries()) {
+            result[tbl] = cols;
+        }
+        return result;
+    }
+    catch (err) {
+        console.error('Failed to getDetailedColumns:', err);
+        return {};
+    }
+});
 electron_1.ipcMain.handle('oracle:get-table-column-details', async (_, config, schemaName, tableName) => {
     return await oracleService.getTableColumnDetails(config, schemaName, tableName);
 });
@@ -283,7 +297,7 @@ electron_1.ipcMain.handle('oracle:get-top-sql', async (_, config) => {
 electron_1.ipcMain.handle('ai:call-provider', async (_, params) => {
     const startTime = Date.now();
     const { provider, apiKey, model, systemPrompt, userPrompt } = params;
-    if (!apiKey || !apiKey.trim()) {
+    if (provider !== 'ollama' && (!apiKey || !apiKey.trim())) {
         return { success: false, error: 'API Key belum diisi. Silakan masukkan API Key di Pengaturan AI.' };
     }
     try {
@@ -343,6 +357,41 @@ electron_1.ipcMain.handle('ai:call-provider', async (_, params) => {
             const text = data.content?.[0]?.text || '';
             return { success: true, content: text, latencyMs: Date.now() - startTime };
         }
+        else if (provider === 'openai' || provider === 'deepseek' || provider === 'ollama') {
+            const isOllama = provider === 'ollama';
+            const isDeepseek = provider === 'deepseek';
+            const endpoint = isOllama
+                ? (params.endpoint || 'http://localhost:11434/v1/chat/completions')
+                : isDeepseek
+                    ? 'https://api.deepseek.com/chat/completions'
+                    : (params.endpoint || 'https://api.openai.com/v1/chat/completions');
+            const selectedModel = model || (isOllama ? 'llama3.2' : isDeepseek ? 'deepseek-chat' : 'gpt-4o-mini');
+            const headers = {
+                'Content-Type': 'application/json',
+            };
+            if (apiKey && apiKey.trim()) {
+                headers['Authorization'] = `Bearer ${apiKey.trim()}`;
+            }
+            const res = await fetch(endpoint, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                    model: selectedModel,
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: userPrompt }
+                    ],
+                    temperature: 0.2,
+                })
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                const msg = data.error?.message || `${provider.toUpperCase()} API error (HTTP ${res.status})`;
+                return { success: false, error: msg, latencyMs: Date.now() - startTime };
+            }
+            const text = data.choices?.[0]?.message?.content || '';
+            return { success: true, content: text, latencyMs: Date.now() - startTime };
+        }
         return { success: false, error: `Provider AI "${provider}" tidak didukung.` };
     }
     catch (err) {
@@ -351,10 +400,10 @@ electron_1.ipcMain.handle('ai:call-provider', async (_, params) => {
 });
 // ==================== SCHEMA COMPARE & SYNC HANDLERS ====================
 electron_1.ipcMain.handle('compare:run', async (_, sourceConfig, sourceSchema, targetConfig, targetSchema) => {
-    return await oracleService.compareSchemas(sourceConfig, sourceSchema, targetConfig, targetSchema);
+    return await multiDbService.compareSchemas(sourceConfig, sourceSchema, targetConfig, targetSchema, oracleService);
 });
 electron_1.ipcMain.handle('compare:generate-sql', async (_, sourceConfig, sourceSchema, targetConfig, targetSchema, selectedItems, includeData) => {
-    return await oracleService.generateMigrationSql(sourceConfig, sourceSchema, targetConfig, targetSchema, selectedItems, includeData);
+    return await multiDbService.generateMigrationSql(sourceConfig, sourceSchema, targetConfig, targetSchema, selectedItems, includeData, oracleService);
 });
 electron_1.ipcMain.handle('compare:execute-sync', async (_, sourceConfig, sourceSchema, targetConfig, targetSchema, options, selectedItems) => {
     const startTime = Date.now();
@@ -664,16 +713,28 @@ electron_1.ipcMain.handle('update:check', async (_, customRemote) => {
         };
     }
 });
-electron_1.ipcMain.handle('update:apply', async (_, customRemote) => {
+electron_1.ipcMain.handle('update:apply', async (_, customRemote, clientTier) => {
     // Entitlement Check: Subscription / Community cannot apply updates. Only Permanent or VIP!
+    let allowed = false;
+    let denyReason = '';
     if (licenseManager) {
         const permCheck = licenseManager.canApplyUpdates();
-        if (!permCheck.allowed) {
-            const errMsg = permCheck.reason ||
-                'Pembaruan aplikasi ke versi baru hanya diizinkan untuk pemegang Lisensi Permanen (Lifetime).';
-            sendUpdateLog('error', errMsg);
-            throw new Error(errMsg);
+        if (permCheck.allowed) {
+            allowed = true;
         }
+        else {
+            denyReason = permCheck.reason || '';
+        }
+    }
+    // If client is marked as VIP or Advanced, grant update entitlement
+    if (!allowed && (clientTier === 'vip' || clientTier === 'advanced')) {
+        allowed = true;
+    }
+    if (!allowed) {
+        const errMsg = denyReason ||
+            'Pembaruan aplikasi ke versi baru hanya diizinkan untuk pemegang Lisensi Permanen (Lifetime) atau Team VIP.';
+        sendUpdateLog('error', errMsg);
+        throw new Error(errMsg);
     }
     const settings = storageService.getSettings();
     const remote = customRemote ||

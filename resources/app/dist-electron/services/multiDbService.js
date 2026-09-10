@@ -1153,5 +1153,448 @@ class MultiDbService {
             return 0;
         }
     }
+    /**
+     * Mengambil metadata detail seluruh kolom tabel pada schema untuk keperluan schema compare.
+     */
+    async getDetailedColumns(config, schemaName, oracleService) {
+        const dbType = config.dbType || 'oracle';
+        if (dbType === 'sqlite') {
+            return await this.getSqliteDetailedColumns(config);
+        }
+        if (dbType === 'postgres') {
+            return await this.getPostgresDetailedColumns(config, schemaName);
+        }
+        if (dbType === 'mysql') {
+            return await this.getMysqlDetailedColumns(config, schemaName);
+        }
+        if (dbType === 'sqlserver') {
+            return await this.getSqlServerDetailedColumns(config, schemaName);
+        }
+        // Default: Oracle
+        if (oracleService && typeof oracleService.getDetailedColumns === 'function') {
+            return await oracleService.getDetailedColumns(config, schemaName);
+        }
+        // Fallback: Query all_tab_columns via executeQuery
+        const colsSql = `
+      SELECT 
+        table_name,
+        column_name,
+        data_type,
+        data_length,
+        data_precision,
+        data_scale,
+        nullable,
+        column_id
+      FROM all_tab_columns
+      WHERE UPPER(owner) = UPPER('${schemaName.replace(/'/g, "''")}')
+      ORDER BY table_name ASC, column_id ASC
+    `;
+        const res = await this.executeQuery(config, colsSql, 0);
+        const map = new Map();
+        for (const r of res.rows) {
+            const tbl = String(r[0]).toUpperCase();
+            if (!map.has(tbl))
+                map.set(tbl, []);
+            map.get(tbl).push({
+                name: String(r[1]).toUpperCase(),
+                dataType: String(r[2] || 'VARCHAR2').toUpperCase(),
+                dataLength: r[3] ? Number(r[3]) : undefined,
+                dataPrecision: r[4] ? Number(r[4]) : undefined,
+                dataScale: r[5] ? Number(r[5]) : undefined,
+                nullable: String(r[6]).toUpperCase() === 'Y',
+                columnId: Number(r[7]) || 1,
+            });
+        }
+        return map;
+    }
+    async getPostgresDetailedColumns(config, schemaName) {
+        const { effectiveConfig, closeTunnel } = await this.resolveEffectiveConfig(config);
+        const client = this.getPgClient(effectiveConfig);
+        try {
+            await client.connect();
+            const sql = `
+        SELECT 
+          table_name,
+          column_name,
+          data_type,
+          character_maximum_length,
+          numeric_precision,
+          numeric_scale,
+          is_nullable,
+          ordinal_position
+        FROM information_schema.columns
+        WHERE table_schema = $1
+        ORDER BY table_name, ordinal_position
+      `;
+            const res = await client.query(sql, [schemaName || 'public']);
+            const map = new Map();
+            for (const r of res.rows) {
+                const tbl = String(r.table_name).toUpperCase();
+                if (!map.has(tbl))
+                    map.set(tbl, []);
+                map.get(tbl).push({
+                    name: String(r.column_name).toUpperCase(),
+                    dataType: String(r.data_type).toUpperCase(),
+                    dataLength: r.character_maximum_length ? Number(r.character_maximum_length) : undefined,
+                    dataPrecision: r.numeric_precision ? Number(r.numeric_precision) : undefined,
+                    dataScale: r.numeric_scale ? Number(r.numeric_scale) : undefined,
+                    nullable: String(r.is_nullable).toUpperCase() === 'YES',
+                    columnId: Number(r.ordinal_position) || 1,
+                });
+            }
+            return map;
+        }
+        finally {
+            await client.end().catch(() => { });
+            if (closeTunnel)
+                await closeTunnel();
+        }
+    }
+    async getMysqlDetailedColumns(config, schemaName) {
+        const { effectiveConfig, closeTunnel } = await this.resolveEffectiveConfig(config);
+        const conn = await this.getMySqlConnection(effectiveConfig);
+        try {
+            const dbName = schemaName || effectiveConfig.databaseName || 'mysql';
+            const [rows] = await conn.query(`SELECT 
+           table_name,
+           column_name,
+           data_type,
+           character_maximum_length,
+           numeric_precision,
+           numeric_scale,
+           is_nullable,
+           ordinal_position
+         FROM information_schema.columns
+         WHERE table_schema = ?
+         ORDER BY table_name, ordinal_position`, [dbName]);
+            const map = new Map();
+            for (const r of rows) {
+                const tbl = String(r.TABLE_NAME || r.table_name).toUpperCase();
+                if (!map.has(tbl))
+                    map.set(tbl, []);
+                map.get(tbl).push({
+                    name: String(r.COLUMN_NAME || r.column_name).toUpperCase(),
+                    dataType: String(r.DATA_TYPE || r.data_type).toUpperCase(),
+                    dataLength: r.CHARACTER_MAXIMUM_LENGTH || r.character_maximum_length ? Number(r.CHARACTER_MAXIMUM_LENGTH || r.character_maximum_length) : undefined,
+                    dataPrecision: r.NUMERIC_PRECISION || r.numeric_precision ? Number(r.NUMERIC_PRECISION || r.numeric_precision) : undefined,
+                    dataScale: r.NUMERIC_SCALE || r.numeric_scale ? Number(r.NUMERIC_SCALE || r.numeric_scale) : undefined,
+                    nullable: String(r.IS_NULLABLE || r.is_nullable).toUpperCase() === 'YES',
+                    columnId: Number(r.ORDINAL_POSITION || r.ordinal_position) || 1,
+                });
+            }
+            return map;
+        }
+        finally {
+            await conn.end().catch(() => { });
+            if (closeTunnel)
+                await closeTunnel();
+        }
+    }
+    async getSqlServerDetailedColumns(config, schemaName) {
+        const sql = `
+      SELECT 
+        TABLE_NAME,
+        COLUMN_NAME,
+        DATA_TYPE,
+        CHARACTER_MAXIMUM_LENGTH,
+        NUMERIC_PRECISION,
+        NUMERIC_SCALE,
+        IS_NULLABLE,
+        ORDINAL_POSITION
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = '${(schemaName || 'dbo').replace(/'/g, "''")}'
+      ORDER BY TABLE_NAME, ORDINAL_POSITION
+    `;
+        const res = await this.executeSqlServerQuery(config, sql, 0);
+        const map = new Map();
+        for (const r of res.rows) {
+            const tbl = String(r[0]).toUpperCase();
+            if (!map.has(tbl))
+                map.set(tbl, []);
+            map.get(tbl).push({
+                name: String(r[1]).toUpperCase(),
+                dataType: String(r[2] || 'VARCHAR').toUpperCase(),
+                dataLength: r[3] ? Number(r[3]) : undefined,
+                dataPrecision: r[4] ? Number(r[4]) : undefined,
+                dataScale: r[5] ? Number(r[5]) : undefined,
+                nullable: String(r[6]).toUpperCase() === 'YES',
+                columnId: Number(r[7]) || 1,
+            });
+        }
+        return map;
+    }
+    async getSqliteDetailedColumns(config) {
+        const db = this.getSqliteDb(config);
+        try {
+            const tables = db
+                .prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'")
+                .all();
+            const map = new Map();
+            for (const t of tables) {
+                const tbl = String(t.name).toUpperCase();
+                const cols = db.prepare(`PRAGMA table_info("${t.name}")`).all();
+                map.set(tbl, cols.map((c) => ({
+                    name: String(c.name).toUpperCase(),
+                    dataType: String(c.type || 'TEXT').toUpperCase(),
+                    nullable: Number(c.notnull) === 0,
+                    columnId: Number(c.cid) || 0,
+                })));
+            }
+            return map;
+        }
+        finally {
+            try {
+                db.close();
+            }
+            catch (_) { }
+        }
+    }
+    /**
+     * Universal Schema Compare: Membandingkan 2 database dan schema secara cross-engine.
+     */
+    async compareSchemas(sourceConfig, sourceSchema, targetConfig, targetSchema, oracleService) {
+        const srcType = sourceConfig.dbType || 'oracle';
+        const tgtType = targetConfig.dbType || 'oracle';
+        // Jika kedua database adalah Oracle, gunakan engine OracleService bawaan
+        if (srcType === 'oracle' && tgtType === 'oracle' && oracleService && typeof oracleService.compareSchemas === 'function') {
+            return await oracleService.compareSchemas(sourceConfig, sourceSchema, targetConfig, targetSchema);
+        }
+        // Ekstraksi Objek dan Kolom dari kedua belah pihak secara paralel
+        const [srcObjects, tgtObjects, srcColsMap, tgtColsMap] = await Promise.all([
+            this.getSchemaObjects(sourceConfig, sourceSchema),
+            this.getSchemaObjects(targetConfig, targetSchema),
+            this.getDetailedColumns(sourceConfig, sourceSchema, oracleService),
+            this.getDetailedColumns(targetConfig, targetSchema, oracleService),
+        ]);
+        const srcObjMap = new Map(srcObjects.map((o) => [o.name.toUpperCase(), o]));
+        const tgtObjMap = new Map(tgtObjects.map((o) => [o.name.toUpperCase(), o]));
+        const allObjectNames = Array.from(new Set([...srcObjMap.keys(), ...tgtObjMap.keys()])).sort();
+        const diffItems = [];
+        let newInSourceCount = 0;
+        let differentCount = 0;
+        let missingInSourceCount = 0;
+        let identicalCount = 0;
+        for (const objName of allObjectNames) {
+            const srcObj = srcObjMap.get(objName);
+            const tgtObj = tgtObjMap.get(objName);
+            const objType = srcObj?.type || tgtObj?.type || 'TABLE';
+            let diffStatus = 'IDENTICAL';
+            const columnDiffs = [];
+            let missingColumnsCount = 0;
+            if (srcObj && !tgtObj) {
+                diffStatus = 'NEW_IN_SOURCE';
+                newInSourceCount++;
+                const srcCols = srcColsMap.get(objName) || [];
+                for (const col of srcCols) {
+                    columnDiffs.push({
+                        name: col.name,
+                        status: 'MISSING_IN_TARGET',
+                        sourceColumn: col,
+                    });
+                    missingColumnsCount++;
+                }
+            }
+            else if (!srcObj && tgtObj) {
+                diffStatus = 'MISSING_IN_SOURCE';
+                missingInSourceCount++;
+                const tgtCols = tgtColsMap.get(objName) || [];
+                for (const col of tgtCols) {
+                    columnDiffs.push({
+                        name: col.name,
+                        status: 'MISSING_IN_SOURCE',
+                        targetColumn: col,
+                    });
+                }
+            }
+            else if (srcObj && tgtObj) {
+                if (objType === 'TABLE') {
+                    const srcCols = srcColsMap.get(objName) || [];
+                    const tgtCols = tgtColsMap.get(objName) || [];
+                    const srcColMap = new Map(srcCols.map((c) => [c.name.toUpperCase(), c]));
+                    const tgtColMap = new Map(tgtCols.map((c) => [c.name.toUpperCase(), c]));
+                    const allCols = Array.from(new Set([...srcColMap.keys(), ...tgtColMap.keys()])).sort();
+                    let hasColDiff = false;
+                    for (const colName of allCols) {
+                        const sc = srcColMap.get(colName);
+                        const tc = tgtColMap.get(colName);
+                        if (sc && !tc) {
+                            columnDiffs.push({ name: colName, status: 'MISSING_IN_TARGET', sourceColumn: sc });
+                            hasColDiff = true;
+                            missingColumnsCount++;
+                        }
+                        else if (!sc && tc) {
+                            columnDiffs.push({ name: colName, status: 'MISSING_IN_SOURCE', targetColumn: tc });
+                            hasColDiff = true;
+                        }
+                        else if (sc && tc) {
+                            const typeMatch = sc.dataType === tc.dataType || sc.dataType.includes(tc.dataType) || tc.dataType.includes(sc.dataType);
+                            const isModified = !typeMatch || sc.nullable !== tc.nullable;
+                            if (isModified) {
+                                columnDiffs.push({ name: colName, status: 'MODIFIED', sourceColumn: sc, targetColumn: tc });
+                                hasColDiff = true;
+                            }
+                            else {
+                                columnDiffs.push({ name: colName, status: 'MATCH', sourceColumn: sc, targetColumn: tc });
+                            }
+                        }
+                    }
+                    if (hasColDiff) {
+                        diffStatus = 'DIFFERENT';
+                        differentCount++;
+                    }
+                    else {
+                        diffStatus = 'IDENTICAL';
+                        identicalCount++;
+                    }
+                }
+                else {
+                    diffStatus = 'IDENTICAL';
+                    identicalCount++;
+                }
+            }
+            diffItems.push({
+                id: `${objType}-${objName}`,
+                name: objName,
+                type: objType,
+                status: diffStatus,
+                sourceOwner: sourceSchema,
+                targetOwner: targetSchema,
+                sourceRowCount: srcObj?.rowCount,
+                targetRowCount: tgtObj?.rowCount,
+                columnDiffs,
+                missingColumnsCount,
+            });
+        }
+        const statusOrder = {
+            NEW_IN_SOURCE: 0,
+            DIFFERENT: 1,
+            MISSING_IN_SOURCE: 2,
+            IDENTICAL: 3,
+        };
+        diffItems.sort((a, b) => {
+            if (statusOrder[a.status] !== statusOrder[b.status]) {
+                return statusOrder[a.status] - statusOrder[b.status];
+            }
+            return a.name.localeCompare(b.name);
+        });
+        return {
+            sourceConnectionName: sourceConfig.name,
+            sourceSchema,
+            targetConnectionName: targetConfig.name,
+            targetSchema,
+            timestamp: new Date().toISOString(),
+            totalObjects: diffItems.length,
+            newInSourceCount,
+            differentCount,
+            missingInSourceCount,
+            identicalCount,
+            items: diffItems,
+        };
+    }
+    /**
+     * Universal Migration SQL Generator: Menghasilkan DDL/DML sinkronisasi yang disesuaikan dengan engine target.
+     */
+    async generateMigrationSql(sourceConfig, sourceSchema, targetConfig, targetSchema, selectedItems, includeData, oracleService) {
+        const tgtType = targetConfig.dbType || 'oracle';
+        if (tgtType === 'oracle' && oracleService && typeof oracleService.generateMigrationSql === 'function') {
+            return await oracleService.generateMigrationSql(sourceConfig, sourceSchema, targetConfig, targetSchema, selectedItems, includeData);
+        }
+        const sqlParts = [];
+        sqlParts.push(`-- ====================================================================`);
+        sqlParts.push(`-- ZeenIQ Multi-Database Schema Migration Script`);
+        sqlParts.push(`-- Source: ${sourceConfig.name} (${(sourceConfig.dbType || 'oracle').toUpperCase()}) [Schema: ${sourceSchema}]`);
+        sqlParts.push(`-- Target: ${targetConfig.name} (${tgtType.toUpperCase()}) [Schema: ${targetSchema}]`);
+        sqlParts.push(`-- Dihasilkan pada: ${new Date().toLocaleString()}`);
+        sqlParts.push(`-- Total Objek Terpilih: ${selectedItems.length}`);
+        sqlParts.push(`-- ====================================================================\n`);
+        const quoteId = (name) => {
+            if (tgtType === 'mysql')
+                return `\`${name}\``;
+            if (tgtType === 'sqlserver')
+                return `[${name}]`;
+            return `"${name}"`;
+        };
+        const normalizeType = (dt, len, prec, scale) => {
+            const upper = dt.toUpperCase();
+            if (upper.includes('VARCHAR') || upper.includes('CHAR')) {
+                return len && len > 0 && len < 4000 ? `VARCHAR(${len})` : tgtType === 'postgres' ? 'TEXT' : 'VARCHAR(255)';
+            }
+            if (upper.includes('INT') || upper.includes('NUMBER')) {
+                if (scale && scale > 0)
+                    return `DECIMAL(${prec || 15}, ${scale})`;
+                if (prec && prec > 9)
+                    return 'BIGINT';
+                return 'INTEGER';
+            }
+            if (upper.includes('TEXT') || upper.includes('CLOB'))
+                return tgtType === 'oracle' ? 'CLOB' : 'TEXT';
+            if (upper.includes('DATE') || upper.includes('TIME'))
+                return 'TIMESTAMP';
+            if (upper.includes('BOOL'))
+                return tgtType === 'oracle' ? 'NUMBER(1)' : 'BOOLEAN';
+            return upper;
+        };
+        for (const item of selectedItems) {
+            if (item.status === 'NEW_IN_SOURCE' && item.type === 'TABLE') {
+                sqlParts.push(`-- [+] Buat Tabel Baru: ${item.name}`);
+                const colDefs = [];
+                for (const cd of item.columnDiffs) {
+                    const col = cd.sourceColumn;
+                    if (!col)
+                        continue;
+                    const typeStr = normalizeType(col.dataType, col.dataLength, col.dataPrecision, col.dataScale);
+                    const nullStr = col.nullable ? '' : ' NOT NULL';
+                    colDefs.push(`  ${quoteId(col.name)} ${typeStr}${nullStr}`);
+                }
+                if (colDefs.length > 0) {
+                    sqlParts.push(`CREATE TABLE ${quoteId(item.name)} (\n${colDefs.join(',\n')}\n);`);
+                }
+                else {
+                    sqlParts.push(`CREATE TABLE ${quoteId(item.name)} (\n  id INTEGER PRIMARY KEY\n);`);
+                }
+                sqlParts.push('');
+            }
+            else if (item.status === 'DIFFERENT' && item.type === 'TABLE') {
+                const missingCols = item.columnDiffs.filter((cd) => cd.status === 'MISSING_IN_TARGET');
+                const modifiedCols = item.columnDiffs.filter((cd) => cd.status === 'MODIFIED');
+                if (missingCols.length > 0 || modifiedCols.length > 0) {
+                    sqlParts.push(`-- [*] Sinkronisasi Kolom Tabel: ${item.name}`);
+                    // Tambahkan kolom yang belum ada di target
+                    for (const mc of missingCols) {
+                        const col = mc.sourceColumn;
+                        if (!col)
+                            continue;
+                        const typeStr = normalizeType(col.dataType, col.dataLength, col.dataPrecision, col.dataScale);
+                        const nullStr = col.nullable ? '' : ' NOT NULL DEFAULT \'\'';
+                        sqlParts.push(`ALTER TABLE ${quoteId(item.name)} ADD COLUMN ${quoteId(col.name)} ${typeStr}${nullStr};`);
+                    }
+                    // Modifikasi kolom yang tipe datanya berbeda
+                    for (const mod of modifiedCols) {
+                        const col = mod.sourceColumn;
+                        if (!col)
+                            continue;
+                        const typeStr = normalizeType(col.dataType, col.dataLength, col.dataPrecision, col.dataScale);
+                        if (tgtType === 'postgres') {
+                            sqlParts.push(`ALTER TABLE ${quoteId(item.name)} ALTER COLUMN ${quoteId(col.name)} TYPE ${typeStr};`);
+                        }
+                        else if (tgtType === 'mysql') {
+                            sqlParts.push(`ALTER TABLE ${quoteId(item.name)} MODIFY COLUMN ${quoteId(col.name)} ${typeStr};`);
+                        }
+                        else if (tgtType === 'sqlserver') {
+                            sqlParts.push(`ALTER TABLE ${quoteId(item.name)} ALTER COLUMN ${quoteId(col.name)} ${typeStr};`);
+                        }
+                        else {
+                            sqlParts.push(`-- Catatan: SQLite tidak mendukung ALTER COLUMN langsung untuk ${col.name}`);
+                        }
+                    }
+                    sqlParts.push('');
+                }
+            }
+        }
+        if (sqlParts.length <= 6) {
+            sqlParts.push('-- Tidak ada perbedaan DDL yang perlu disinkronkan untuk item terpilih.');
+        }
+        return sqlParts.join('\n');
+    }
 }
 exports.MultiDbService = MultiDbService;

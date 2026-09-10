@@ -397,8 +397,8 @@ class UpdateService {
                 catch (e) { }
                 reject(err);
             });
-            req.setTimeout(120000, () => {
-                req.destroy(new Error('Timeout mengunduh update (>120 detik)'));
+            req.setTimeout(300000, () => {
+                req.destroy(new Error('Timeout mengunduh update (>300 detik)'));
             });
         });
     }
@@ -501,7 +501,7 @@ class UpdateService {
             if (isDir) {
                 // Mode A Staging: robocopy
                 updateCommands = `
-robocopy "${remote}" "%DEST%" /E /XD zeeniq_oracle_data Data logs temp /NFL /NDL >nul
+robocopy "${remote}" "%DEST%" /E /XD zeeniq_oracle_data Data logs temp /R:2 /W:1 /NFL /NDL >nul
 `;
             }
             else {
@@ -510,7 +510,7 @@ robocopy "${remote}" "%DEST%" /E /XD zeeniq_oracle_data Data logs temp /NFL /NDL
 where git >nul 2>nul
 if %errorlevel% neq 0 (
   echo Git tidak ditemukan. Mengunduh pembaruan via PowerShell...
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}; $zip = Join-Path $env:TEMP 'zeeniq_up.zip'; $dir = Join-Path $env:TEMP 'zeeniq_up'; Remove-Item -Force -Recurse $dir -ErrorAction SilentlyContinue; Invoke-WebRequest -Uri 'https://codeload.github.com/imamqordlowi16/ZeeniQDBPortabelTools/zip/refs/heads/main' -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $dir -Force; $src = (Get-ChildItem -Path $dir | Select-Object -First 1).FullName; robocopy $src '%DEST%' /E /XD zeeniq_oracle_data Data logs temp /NFL /NDL; Remove-Item -Force $zip; Remove-Item -Force -Recurse $dir;"
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}; $zip = Join-Path $env:TEMP 'zeeniq_up.zip'; $dir = Join-Path $env:TEMP 'zeeniq_up'; Remove-Item -Force -Recurse $dir -ErrorAction SilentlyContinue; Invoke-WebRequest -Uri 'https://codeload.github.com/imamqordlowi16/ZeeniQDBPortabelTools/zip/refs/heads/main' -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $dir -Force; $src = (Get-ChildItem -Path $dir | Select-Object -First 1).FullName; robocopy $src '%DEST%' /E /XD zeeniq_oracle_data Data logs temp /R:2 /W:1 /NFL /NDL; Remove-Item -Force $zip; Remove-Item -Force -Recurse $dir;"
 ) else (
   cd /d "%DEST%"
   if exist ".git\\index.lock" del /f /q ".git\\index.lock" >nul 2>nul
@@ -530,19 +530,26 @@ set PID=${pid}
 set REMOTE=${remote}
 set DEST=${appFolder}
 
-:: Pastikan proses utama dan child-nya sudah benar-benar tertutup
+:: Pastikan seluruh proses aplikasi dan child-nya sudah benar-benar tertutup
 taskkill /F /PID %PID% >nul 2>nul
-taskkill /F /IM ${exeName} >nul 2>nul
+taskkill /F /IM ZeenIQ-Oracle-Tools.exe >nul 2>nul
+taskkill /F /IM ZeenIQ-Oracle-Tools-VIP.exe >nul 2>nul
+taskkill /F /IM electron.exe >nul 2>nul
 timeout /t 2 /nobreak >nul
 
 if exist "%DEST%\\.git\\index.lock" del /f /q "%DEST%\\.git\\index.lock" >nul 2>nul
 
 ${updateCommands}
 
+:: Pastikan version.txt di root aplikasi selalu sinkron
+if exist "%DEST%\\resources\\app\\version.txt" (
+  copy /y "%DEST%\\resources\\app\\version.txt" "%DEST%\\version.txt" >nul 2>nul
+)
+
 if exist "%DEST%\\ZeenIQ-Oracle-Tools-VIP.exe" (
   start "" "%DEST%\\ZeenIQ-Oracle-Tools-VIP.exe"
-) else if exist "%DEST%\\${exeName}" (
-  start "" "%DEST%\\${exeName}"
+) else if exist "%DEST%\\ZeenIQ-Oracle-Tools.exe" (
+  start "" "%DEST%\\ZeenIQ-Oracle-Tools.exe"
 ) else if exist "%DEST%\\RUN-ZEENIQ-TEAM.bat" (
   start "" "%DEST%\\RUN-ZEENIQ-TEAM.bat"
 ) else if exist "%DEST%\\RUN-ZEENIQ.bat" (

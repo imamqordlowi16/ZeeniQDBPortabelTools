@@ -9,6 +9,7 @@ const electronAPI = {
     getSchemas: (config) => electron_1.ipcRenderer.invoke('oracle:get-schemas', config),
     getSchemaObjects: (config, schemaName) => electron_1.ipcRenderer.invoke('oracle:get-schema-objects', config, schemaName),
     getSchemaTableColumns: (config, schemaName) => electron_1.ipcRenderer.invoke('oracle:get-schema-table-columns', config, schemaName),
+    getDetailedSchemaColumns: (config, schemaName) => electron_1.ipcRenderer.invoke('schema:get-detailed-columns', config, schemaName),
     getTableColumnDetails: (config, schemaName, tableName) => electron_1.ipcRenderer.invoke('oracle:get-table-column-details', config, schemaName, tableName),
     getObjectDDL: (config, schemaName, objectType, objectName) => electron_1.ipcRenderer.invoke('oracle:get-object-ddl', config, schemaName, objectType, objectName),
     getTableLiveRowCount: (config, schemaName, tableName) => electron_1.ipcRenderer.invoke('oracle:get-table-live-count', config, schemaName, tableName),
@@ -100,7 +101,7 @@ const electronAPI = {
     networkResetRouting: (config) => electron_1.ipcRenderer.invoke('network:reset-routing', config),
     // Self-Updating Application Engine
     checkForUpdate: (remote) => electron_1.ipcRenderer.invoke('update:check', remote),
-    applyUpdate: (remote) => electron_1.ipcRenderer.invoke('update:apply', remote),
+    applyUpdate: (remote, clientTier) => electron_1.ipcRenderer.invoke('update:apply', remote, clientTier),
     publishUpdate: (remote, newVersion) => electron_1.ipcRenderer.invoke('update:publish', remote, newVersion),
     publishSource: (remote) => electron_1.ipcRenderer.invoke('update:publish-source', remote),
     verifyPin: (pin) => electron_1.ipcRenderer.invoke('update:verify-pin', pin),

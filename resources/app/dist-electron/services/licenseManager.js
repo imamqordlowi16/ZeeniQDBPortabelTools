@@ -72,6 +72,19 @@ class LicenseManager {
                 return true;
             if (process.env.ZEENIQ_EDITION === 'team' || process.env.ZEENIQ_EDITION === 'vip')
                 return false;
+            // Check for VIP build marker first in all candidate locations
+            const appFolder = electron_1.app && electron_1.app.isPackaged ? path_1.default.dirname(process.execPath) : process.cwd();
+            const vipMarkers = [
+                path_1.default.join(appFolder, '.zeeniq_vip_build'),
+                path_1.default.join(appFolder, 'resources', 'app', '.zeeniq_vip_build'),
+                path_1.default.join(__dirname, '..', '.zeeniq_vip_build'),
+                path_1.default.join(process.cwd(), '.zeeniq_vip_build'),
+                path_1.default.join(__dirname, '.zeeniq_vip_build'),
+            ];
+            for (const m of vipMarkers) {
+                if (fs_1.default.existsSync(m))
+                    return false;
+            }
             if (electron_1.app) {
                 const exeName = path_1.default.basename(process.execPath).toLowerCase();
                 if (exeName.includes('vip'))
@@ -422,33 +435,42 @@ class LicenseManager {
             }
             catch { }
         }
-        try {
-            if (!fs_1.default.existsSync(this.licenseFilePath)) {
-                return defaultCommunity;
-            }
-            const encrypted = fs_1.default.readFileSync(this.licenseFilePath, 'utf8');
-            const decipher = crypto_1.default.createDecipheriv('aes-256-cbc', crypto_1.default.createHash('sha256').update(ZEENIQ_SALT).digest(), Buffer.alloc(16, 0));
-            let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-            decrypted += decipher.final('utf8');
-            const parsed = JSON.parse(decrypted);
-            // Re-validate against current machine
-            const val = this.validateKey(parsed.licenseKey, parsed.licensedTo);
-            if (val.valid) {
-                if (this.isCommercialEdition() && val.tier === 'vip') {
-                    return defaultCommunity;
+        // 1. Scan all candidate license storage paths
+        const appFolder = electron_1.app && electron_1.app.isPackaged ? path_1.default.dirname(process.execPath) : process.cwd();
+        const userDataDir = electron_1.app?.isReady() ? electron_1.app.getPath('userData') : process.cwd();
+        const candidateFiles = [
+            this.licenseFilePath,
+            path_1.default.join(appFolder, 'data', '.zeeniq_license.enc'),
+            path_1.default.join(appFolder, 'data', '.zeeniq_license_commercial.enc'),
+            path_1.default.join(userDataDir, '.zeeniq_license.enc'),
+            path_1.default.join(userDataDir, '.zeeniq_license_commercial.enc'),
+            path_1.default.join(process.cwd(), '.zeeniq_license.enc'),
+            path_1.default.join(process.cwd(), '.zeeniq_license_commercial.enc'),
+        ];
+        for (const licFile of candidateFiles) {
+            try {
+                if (!licFile || !fs_1.default.existsSync(licFile))
+                    continue;
+                const encrypted = fs_1.default.readFileSync(licFile, 'utf8');
+                const decipher = crypto_1.default.createDecipheriv('aes-256-cbc', crypto_1.default.createHash('sha256').update(ZEENIQ_SALT).digest(), Buffer.alloc(16, 0));
+                let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+                decrypted += decipher.final('utf8');
+                const parsed = JSON.parse(decrypted);
+                // Re-validate against current machine
+                const val = this.validateKey(parsed.licenseKey, parsed.licensedTo);
+                if (val.valid) {
+                    if (this.isCommercialEdition() && val.tier === 'vip') {
+                        continue;
+                    }
+                    return {
+                        ...parsed,
+                        tier: val.tier,
+                    };
                 }
-                return {
-                    ...parsed,
-                    tier: val.tier,
-                };
             }
-            else {
-                return defaultCommunity;
-            }
+            catch { }
         }
-        catch {
-            return defaultCommunity;
-        }
+        return defaultCommunity;
     }
     /**
      * Clears saved license (reverts to community tier).
@@ -476,6 +498,19 @@ class LicenseManager {
         }
         if ((active.tier === 'pro' || active.tier === 'starter') && active.isPermanent) {
             return { allowed: true };
+        }
+        // Also check if .zeeniq_vip_build exists in any location
+        const appFolder = electron_1.app && electron_1.app.isPackaged ? path_1.default.dirname(process.execPath) : process.cwd();
+        const vipMarkers = [
+            path_1.default.join(appFolder, '.zeeniq_vip_build'),
+            path_1.default.join(appFolder, 'resources', 'app', '.zeeniq_vip_build'),
+            path_1.default.join(__dirname, '..', '.zeeniq_vip_build'),
+            path_1.default.join(process.cwd(), '.zeeniq_vip_build'),
+        ];
+        for (const m of vipMarkers) {
+            if (fs_1.default.existsSync(m)) {
+                return { allowed: true };
+            }
         }
         if (active.tier === 'pro' || active.tier === 'starter') {
             return {
