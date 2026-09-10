@@ -19,6 +19,7 @@ const licenseManager_1 = require("./services/licenseManager");
 const txtBundleService_1 = require("./services/txtBundleService");
 const multiDbService_1 = require("./services/multiDbService");
 const ssisService_1 = require("./services/ssisService");
+const sshTunnelService_1 = require("./services/sshTunnelService");
 function writeLog(msg) {
     const line = `[${new Date().toISOString()}] ${msg}\n`;
     try {
@@ -172,6 +173,9 @@ electron_1.ipcMain.handle('oracle:test-connection', async (_, config) => {
         };
     }
     return await oracleService.testConnection(config);
+});
+electron_1.ipcMain.handle('ssh:test-connection', async (_, config) => {
+    return await sshTunnelService_1.sshTunnelService.testSshConnection(config);
 });
 electron_1.ipcMain.handle('oracle:get-schemas', async (_, config) => {
     if (config.dbType && config.dbType !== 'oracle') {
@@ -873,11 +877,17 @@ electron_1.ipcMain.handle('tools:run-script', async (_, scriptKey, customParams,
             scriptCode += `& "${scriptPath.replace(/["`$]/g, '`$&')}" -NoPause\n`;
             const encodedCommand = Buffer.from(scriptCode, 'utf16le').toString('base64');
             psArgs.push('-EncodedCommand', encodedCommand);
-            proc = spawn('powershell.exe', psArgs, { windowsHide: false });
+            const psBin = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
+            proc = spawn(psBin, psArgs, { windowsHide: false });
         }
         else {
-            // .bat file
-            proc = spawn('cmd.exe', ['/c', scriptPath], { windowsHide: false });
+            // .bat or shell script
+            if (process.platform === 'win32') {
+                proc = spawn('cmd.exe', ['/c', scriptPath], { windowsHide: false });
+            }
+            else {
+                proc = spawn('/bin/sh', [scriptPath], { windowsHide: false });
+            }
         }
         sendToolOutput(`▶ Menjalankan: ${tool.script}${customParams ? ` (Parameter: ${JSON.stringify(customParams)})` : ''}`, 'system');
         proc.stdout?.on('data', (data) => {

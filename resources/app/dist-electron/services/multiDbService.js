@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MultiDbService = void 0;
+const sshTunnelService_1 = require("./sshTunnelService");
 function getPgClientClass() {
     try {
         return require('pg').Client;
@@ -25,86 +26,164 @@ function getTediousModule() {
         throw new Error("Modul driver SQL Server ('tedious') belum terpasang di runtime aplikasi.");
     }
 }
+function getSqliteModule() {
+    try {
+        return require('node:sqlite');
+    }
+    catch (err) {
+        throw new Error("Modul native SQLite ('node:sqlite') tidak tersedia di runtime ini.");
+    }
+}
 class MultiDbService {
+    /**
+     * Menghasilkan konfigurasi efektif. Jika SSH Tunnel aktif, membuka local forwarder.
+     */
+    async resolveEffectiveConfig(config) {
+        if (config.sshTunnel && config.sshTunnel.enabled) {
+            const tunnel = await sshTunnelService_1.sshTunnelService.createTunnel(config);
+            const effectiveConfig = {
+                ...config,
+                host: '127.0.0.1',
+                port: tunnel.localPort,
+            };
+            return { effectiveConfig, closeTunnel: tunnel.close };
+        }
+        return { effectiveConfig: config };
+    }
     /**
      * Test connection to target database
      */
     async testConnection(config) {
-        const dbType = config.dbType || 'oracle';
-        if (dbType === 'postgres') {
-            return await this.testPostgresConnection(config);
+        const { effectiveConfig, closeTunnel } = await this.resolveEffectiveConfig(config);
+        try {
+            const dbType = effectiveConfig.dbType || 'oracle';
+            if (dbType === 'postgres') {
+                return await this.testPostgresConnection(effectiveConfig);
+            }
+            else if (dbType === 'mysql') {
+                return await this.testMySqlConnection(effectiveConfig);
+            }
+            else if (dbType === 'sqlserver') {
+                return await this.testSqlServerConnection(effectiveConfig);
+            }
+            else if (dbType === 'sqlite') {
+                return await this.testSqliteConnection(effectiveConfig);
+            }
+            return { success: false, message: `Database type '${dbType}' tidak didukung oleh MultiDbService.` };
         }
-        else if (dbType === 'mysql') {
-            return await this.testMySqlConnection(config);
+        finally {
+            if (closeTunnel) {
+                await closeTunnel().catch(() => { });
+            }
         }
-        else if (dbType === 'sqlserver') {
-            return await this.testSqlServerConnection(config);
-        }
-        return { success: false, message: `Database type '${dbType}' tidak didukung oleh MultiDbService.` };
     }
     /**
      * Execute query on target database
      */
     async executeQuery(config, sql, maxRows = 0, targetSchema) {
-        const dbType = config.dbType || 'oracle';
-        if (dbType === 'postgres') {
-            return await this.executePostgresQuery(config, sql, maxRows, targetSchema);
+        const { effectiveConfig, closeTunnel } = await this.resolveEffectiveConfig(config);
+        try {
+            const dbType = effectiveConfig.dbType || 'oracle';
+            if (dbType === 'postgres') {
+                return await this.executePostgresQuery(effectiveConfig, sql, maxRows, targetSchema);
+            }
+            else if (dbType === 'mysql') {
+                return await this.executeMySqlQuery(effectiveConfig, sql, maxRows, targetSchema);
+            }
+            else if (dbType === 'sqlserver') {
+                return await this.executeSqlServerQuery(effectiveConfig, sql, maxRows, targetSchema);
+            }
+            else if (dbType === 'sqlite') {
+                return await this.executeSqliteQuery(effectiveConfig, sql, maxRows);
+            }
+            throw new Error(`Database type '${dbType}' tidak didukung untuk eksekusi SQL.`);
         }
-        else if (dbType === 'mysql') {
-            return await this.executeMySqlQuery(config, sql, maxRows, targetSchema);
+        finally {
+            if (closeTunnel) {
+                await closeTunnel().catch(() => { });
+            }
         }
-        else if (dbType === 'sqlserver') {
-            return await this.executeSqlServerQuery(config, sql, maxRows, targetSchema);
-        }
-        throw new Error(`Database type '${dbType}' tidak didukung untuk eksekusi SQL.`);
     }
     /**
      * Get list of schemas / databases
      */
     async getSchemas(config) {
-        const dbType = config.dbType || 'oracle';
-        if (dbType === 'postgres') {
-            return await this.getPostgresSchemas(config);
+        const { effectiveConfig, closeTunnel } = await this.resolveEffectiveConfig(config);
+        try {
+            const dbType = effectiveConfig.dbType || 'oracle';
+            if (dbType === 'postgres') {
+                return await this.getPostgresSchemas(effectiveConfig);
+            }
+            else if (dbType === 'mysql') {
+                return await this.getMySqlDatabases(effectiveConfig);
+            }
+            else if (dbType === 'sqlserver') {
+                return await this.getSqlServerDatabases(effectiveConfig);
+            }
+            else if (dbType === 'sqlite') {
+                return await this.getSqliteSchemas(effectiveConfig);
+            }
+            return [];
         }
-        else if (dbType === 'mysql') {
-            return await this.getMySqlDatabases(config);
+        finally {
+            if (closeTunnel) {
+                await closeTunnel().catch(() => { });
+            }
         }
-        else if (dbType === 'sqlserver') {
-            return await this.getSqlServerDatabases(config);
-        }
-        return [];
     }
     /**
      * Get list of tables / views in a schema
      */
     async getSchemaObjects(config, schemaName) {
-        const dbType = config.dbType || 'oracle';
-        if (dbType === 'postgres') {
-            return await this.getPostgresObjects(config, schemaName);
+        const { effectiveConfig, closeTunnel } = await this.resolveEffectiveConfig(config);
+        try {
+            const dbType = effectiveConfig.dbType || 'oracle';
+            if (dbType === 'postgres') {
+                return await this.getPostgresObjects(effectiveConfig, schemaName);
+            }
+            else if (dbType === 'mysql') {
+                return await this.getMySqlObjects(effectiveConfig, schemaName);
+            }
+            else if (dbType === 'sqlserver') {
+                return await this.getSqlServerObjects(effectiveConfig, schemaName);
+            }
+            else if (dbType === 'sqlite') {
+                return await this.getSqliteObjects(effectiveConfig, schemaName);
+            }
+            return [];
         }
-        else if (dbType === 'mysql') {
-            return await this.getMySqlObjects(config, schemaName);
+        finally {
+            if (closeTunnel) {
+                await closeTunnel().catch(() => { });
+            }
         }
-        else if (dbType === 'sqlserver') {
-            return await this.getSqlServerObjects(config, schemaName);
-        }
-        return [];
     }
     /**
      * Get table columns map for schema
      */
     async getSchemaTableColumns(config, schemaName) {
-        const dbType = config.dbType || 'oracle';
-        if (dbType === 'postgres') {
-            return await this.getPostgresTableColumns(config, schemaName);
+        const { effectiveConfig, closeTunnel } = await this.resolveEffectiveConfig(config);
+        try {
+            const dbType = effectiveConfig.dbType || 'oracle';
+            if (dbType === 'postgres') {
+                return await this.getPostgresTableColumns(effectiveConfig, schemaName);
+            }
+            else if (dbType === 'mysql') {
+                return await this.getMySqlTableColumns(effectiveConfig, schemaName);
+            }
+            else if (dbType === 'sqlserver') {
+                return await this.getSqlServerTableColumns(effectiveConfig, schemaName);
+            }
+            else if (dbType === 'sqlite') {
+                return await this.getSqliteTableColumns(effectiveConfig, schemaName);
+            }
+            return {};
         }
-        else if (dbType === 'mysql') {
-            return await this.getMySqlTableColumns(config, schemaName);
+        finally {
+            if (closeTunnel) {
+                await closeTunnel().catch(() => { });
+            }
         }
-        else if (dbType === 'sqlserver') {
-            return await this.getSqlServerTableColumns(config, schemaName);
-        }
-        return {};
     }
     /**
      * Get live row count
@@ -112,7 +191,10 @@ class MultiDbService {
     async getTableLiveRowCount(config, schemaName, tableName) {
         const dbType = config.dbType || 'oracle';
         try {
-            if (dbType === 'postgres') {
+            if (dbType === 'sqlite') {
+                return await this.getSqliteTableRowCount(config, tableName);
+            }
+            else if (dbType === 'postgres') {
                 const client = this.getPgClient(config, schemaName);
                 await client.connect();
                 try {
@@ -896,6 +978,179 @@ class MultiDbService {
                 }
                 catch (e) { }
             }
+        }
+    }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SQLITE IMPLEMENTATION (Native node:sqlite)
+    // ═══════════════════════════════════════════════════════════════════════════
+    getSqliteDbPath(config) {
+        return (config.host || config.databaseName || '').trim();
+    }
+    getSqliteDb(config) {
+        const { DatabaseSync } = getSqliteModule();
+        const dbPath = this.getSqliteDbPath(config);
+        if (!dbPath) {
+            throw new Error('Path file database SQLite belum ditentukan.');
+        }
+        const fs = require('fs');
+        if (dbPath !== ':memory:' && !fs.existsSync(dbPath)) {
+            throw new Error(`File database SQLite tidak ditemukan: ${dbPath}`);
+        }
+        return new DatabaseSync(dbPath);
+    }
+    async testSqliteConnection(config) {
+        try {
+            const db = this.getSqliteDb(config);
+            const row = db.prepare('SELECT sqlite_version() AS version').get();
+            const version = `SQLite v${row?.version || '3.x'}`;
+            db.close();
+            return {
+                success: true,
+                message: `Koneksi ke database SQLite berhasil!\nFile: ${this.getSqliteDbPath(config)}\n${version}`,
+                version,
+            };
+        }
+        catch (err) {
+            return {
+                success: false,
+                message: `Gagal membuka database SQLite: ${err?.message || err}`,
+            };
+        }
+    }
+    async executeSqliteQuery(config, sql, maxRows = 0) {
+        const startTime = Date.now();
+        const db = this.getSqliteDb(config);
+        try {
+            const cleanSql = sql.trim();
+            const isSelect = /^(SELECT|PRAGMA|WITH|EXPLAIN)\b/i.test(cleanSql);
+            if (isSelect) {
+                const stmt = db.prepare(cleanSql);
+                const allRows = stmt.all();
+                const totalAvailable = allRows.length;
+                const limitedRows = maxRows && maxRows > 0 ? allRows.slice(0, maxRows) : allRows;
+                const columns = limitedRows.length > 0 ? Object.keys(limitedRows[0]) : [];
+                const columnMeta = columns.map((col) => ({
+                    name: col,
+                    dataType: 'TEXT',
+                    nullable: true,
+                }));
+                const rows = limitedRows.map((rowObj) => columns.map((colName) => rowObj[colName] ?? null));
+                return {
+                    success: true,
+                    columns,
+                    columnMeta,
+                    rows,
+                    rowCount: totalAvailable,
+                    executionTimeMs: Date.now() - startTime,
+                    statementResults: [
+                        {
+                            sql: cleanSql,
+                            success: true,
+                            columns,
+                            columnMeta,
+                            rows,
+                            rowCount: totalAvailable,
+                            executionTimeMs: Date.now() - startTime,
+                        },
+                    ],
+                };
+            }
+            else {
+                db.exec(cleanSql);
+                return {
+                    success: true,
+                    columns: [],
+                    columnMeta: [],
+                    rows: [],
+                    rowCount: 0,
+                    executionTimeMs: Date.now() - startTime,
+                    statementResults: [
+                        {
+                            title: 'SQLite Statement',
+                            sql,
+                            columns: [],
+                            columnMeta: [],
+                            rows: [],
+                            rowCount: 0,
+                            executionTimeMs: Date.now() - startTime,
+                            success: true,
+                        },
+                    ],
+                };
+            }
+        }
+        finally {
+            try {
+                db.close();
+            }
+            catch (_) { }
+        }
+    }
+    async getSqliteSchemas(config) {
+        try {
+            const db = this.getSqliteDb(config);
+            const tables = db.prepare("SELECT count(1) AS cnt FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all();
+            const views = db.prepare("SELECT count(1) AS cnt FROM sqlite_master WHERE type='view'").all();
+            db.close();
+            return [
+                {
+                    name: 'main',
+                    tablesCount: tables[0]?.cnt || 0,
+                    viewsCount: views[0]?.cnt || 0,
+                    sequencesCount: 0,
+                    triggersCount: 0,
+                    proceduresCount: 0,
+                },
+            ];
+        }
+        catch {
+            return [{ name: 'main', tablesCount: 0, viewsCount: 0, sequencesCount: 0, triggersCount: 0, proceduresCount: 0 }];
+        }
+    }
+    async getSqliteObjects(config, _schemaName) {
+        try {
+            const db = this.getSqliteDb(config);
+            const rows = db
+                .prepare("SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name")
+                .all();
+            db.close();
+            return rows.map((r) => ({
+                name: r.name,
+                type: r.type === 'view' ? 'VIEW' : 'TABLE',
+                owner: 'main',
+            }));
+        }
+        catch {
+            return [];
+        }
+    }
+    async getSqliteTableColumns(config, _schemaName) {
+        try {
+            const db = this.getSqliteDb(config);
+            const tables = db
+                .prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'")
+                .all();
+            const map = {};
+            for (const t of tables) {
+                const cols = db.prepare(`PRAGMA table_info("${t.name}")`).all();
+                map[t.name.toUpperCase()] = cols.map((c) => String(c.name).toUpperCase());
+            }
+            db.close();
+            return map;
+        }
+        catch {
+            return {};
+        }
+    }
+    async getSqliteTableRowCount(config, tableName) {
+        try {
+            const db = this.getSqliteDb(config);
+            const row = db.prepare(`SELECT count(1) AS total FROM "${tableName}"`).get();
+            db.close();
+            return Number(row?.total) || 0;
+        }
+        catch {
+            return 0;
         }
     }
 }

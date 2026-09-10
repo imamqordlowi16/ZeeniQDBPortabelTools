@@ -2,6 +2,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const electron_1 = require("electron");
 const electronAPI = {
+    // SSH Tunnel Operations
+    testSshConnection: (config) => electron_1.ipcRenderer.invoke('ssh:test-connection', config),
     // Oracle DB Operations
     testConnection: (config) => electron_1.ipcRenderer.invoke('oracle:test-connection', config),
     getSchemas: (config) => electron_1.ipcRenderer.invoke('oracle:get-schemas', config),

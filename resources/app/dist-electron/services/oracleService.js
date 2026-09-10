@@ -10,6 +10,7 @@ const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const archiver_1 = __importDefault(require("archiver"));
 const unzipper_1 = __importDefault(require("unzipper"));
+const sshTunnelService_1 = require("./sshTunnelService");
 // Ensure thin mode is explicitly initialized & LOBs auto-converted
 try {
     oracledb_1.default.initOracleClient = () => { }; // Thin mode is default in oracledb v6+
@@ -62,6 +63,7 @@ class OracleService {
     activeJobs = new Map();
     activeCursors = new Map();
     activeExportJobs = new Map();
+    oracleTunnels = new Map();
     constructor() {
         // Periodically sweep idle cursors older than 10 minutes
         setInterval(() => {
@@ -89,7 +91,20 @@ class OracleService {
         return `${config.host}:${config.port}/${service}`;
     }
     async createConnection(config, maxRetries = 3) {
-        const connectString = this.getConnectString(config);
+        let effectiveConfig = config;
+        if (config.sshTunnel && config.sshTunnel.enabled) {
+            let tunnel = this.oracleTunnels.get(config.id);
+            if (!tunnel) {
+                tunnel = await sshTunnelService_1.sshTunnelService.createTunnel(config);
+                this.oracleTunnels.set(config.id, tunnel);
+            }
+            effectiveConfig = {
+                ...config,
+                host: '127.0.0.1',
+                port: tunnel.localPort,
+            };
+        }
+        const connectString = this.getConnectString(effectiveConfig);
         const connAttrs = {
             user: config.user,
             password: config.password || '',
@@ -131,10 +146,29 @@ class OracleService {
         throw lastError;
     }
     async testConnection(config) {
+        let tempTunnel = null;
+        let targetConfig = config;
+        if (config.sshTunnel && config.sshTunnel.enabled) {
+            try {
+                tempTunnel = await sshTunnelService_1.sshTunnelService.createTunnel(config);
+                targetConfig = {
+                    ...config,
+                    host: '127.0.0.1',
+                    port: tempTunnel.localPort,
+                };
+            }
+            catch (sshErr) {
+                return {
+                    success: false,
+                    latencyMs: 0,
+                    error: `Gagal membuka SSH Tunnel: ${sshErr?.message || sshErr}`,
+                };
+            }
+        }
         const startTime = Date.now();
         let conn = null;
         try {
-            conn = await this.createConnection(config);
+            conn = await this.createConnection(targetConfig);
             const res = await conn.execute(`SELECT banner FROM v$version WHERE ROWNUM = 1`);
             const latencyMs = Date.now() - startTime;
             const banner = res.rows && res.rows.length > 0 ? String(res.rows[0][0]) : 'Oracle Database Connected';
@@ -157,6 +191,14 @@ class OracleService {
             if (conn) {
                 try {
                     await conn.close();
+                }
+                catch (e) {
+                    // ignore
+                }
+            }
+            if (tempTunnel) {
+                try {
+                    await tempTunnel.close();
                 }
                 catch (e) {
                     // ignore
