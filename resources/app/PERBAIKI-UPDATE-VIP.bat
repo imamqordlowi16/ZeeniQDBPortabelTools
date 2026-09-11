@@ -45,6 +45,9 @@ where git >nul 2>nul
 if %errorlevel% equ 0 (
   if exist ".git" (
     echo Menarik pembaruan via Git...
+    set GIT_TERMINAL_PROMPT=0
+    set GCM_INTERACTIVE=never
+    set GIT_CONFIG_PARAMETERS='credential.helper='
     if exist ".git\index.lock" del /f /q ".git\index.lock" >nul 2>nul
     git fetch origin main >nul 2>nul
     git reset --hard origin/main >nul 2>nul

@@ -131,161 +131,51 @@ class UpdateService {
                 }
             }
         }
-        // Kasus 2: Laptop tidak memiliki Git ATAU folder aplikasi bukan repo git (misal hasil instalasi installer)
-        if (!gitAvailable || !fs_1.default.existsSync(gitDir)) {
-            if (ghInfo) {
+        // Kasus 2: Remote adalah GitHub (Online) -> SELALU gunakan Direct HTTPS (100% Mandiri, Bebas Git & Bebas Login)
+        if (ghInfo) {
+            try {
+                // Ambil version.txt langsung via HTTPS (Git-Free)
+                const rawUrl = `https://raw.githubusercontent.com/${ghInfo.owner}/${ghInfo.repo}/main/version.txt`;
+                const remoteVer = await this.fetchHttpsText(rawUrl);
+                const isNewer = this.compareVersions(remoteVer, currentVersion) > 0;
+                // Ambil commit messages terbaru via GitHub API publik
+                let changelog = [];
                 try {
-                    // Ambil version.txt langsung via HTTPS (Git-Free)
-                    const rawUrl = `https://raw.githubusercontent.com/${ghInfo.owner}/${ghInfo.repo}/main/version.txt`;
-                    const remoteVer = await this.fetchHttpsText(rawUrl);
-                    const isNewer = this.compareVersions(remoteVer, currentVersion) > 0;
-                    // Ambil commit messages terbaru via GitHub API
-                    let changelog = [];
-                    try {
-                        const commitsApiUrl = `https://api.github.com/repos/${ghInfo.owner}/${ghInfo.repo}/commits?per_page=5`;
-                        const commitsJson = await this.fetchHttpsText(commitsApiUrl);
-                        const commits = JSON.parse(commitsJson);
-                        if (Array.isArray(commits)) {
-                            changelog = commits.map((c) => {
-                                const sha = (c.sha || '').substring(0, 7);
-                                const msg = (c.commit?.message || '').split('\n')[0];
-                                return `${sha} - ${msg}`;
-                            });
-                        }
+                    const commitsApiUrl = `https://api.github.com/repos/${ghInfo.owner}/${ghInfo.repo}/commits?per_page=5`;
+                    const commitsJson = await this.fetchHttpsText(commitsApiUrl);
+                    const commits = JSON.parse(commitsJson);
+                    if (Array.isArray(commits)) {
+                        changelog = commits.map((c) => {
+                            const sha = (c.sha || '').substring(0, 7);
+                            const msg = (c.commit?.message || '').split('\n')[0];
+                            return `${sha} - ${msg}`;
+                        });
                     }
-                    catch (e) { }
-                    return {
-                        available: isNewer,
-                        commitsBehind: isNewer ? Math.max(changelog.length, 1) : 0,
-                        currentVersion,
-                        remoteVersion: remoteVer,
-                        changelog,
-                        error: null,
-                    };
-                }
-                catch (e) {
-                    return {
-                        available: false,
-                        commitsBehind: 0,
-                        currentVersion,
-                        error: `Gagal akses GitHub (${e?.message || e}). Komputer tidak memiliki Git & akses GitHub terhalang firewall/proxy. Gunakan Path Remote Share lokal (misal: \\\\server\\share\\ZeenIQ).`,
-                    };
-                }
-            }
-            else {
-                return {
-                    available: false,
-                    commitsBehind: 0,
-                    currentVersion,
-                    error: 'Git tidak terpasang di komputer ini dan remote bukan folder share yang valid.',
-                };
-            }
-        }
-        // Kasus 3: Git terpasang dan folder aplikasi adalah git repo
-        try {
-            // Pastikan remote origin sesuai
-            const getUrlRes = await this.runGit(appFolder, ['remote', 'get-url', 'origin']);
-            if (getUrlRes.exitCode === 0) {
-                if (getUrlRes.stdout.trim() !== trimmedRemote) {
-                    await this.runGit(appFolder, ['remote', 'set-url', 'origin', trimmedRemote]);
-                }
-            }
-            else {
-                await this.runGit(appFolder, ['remote', 'add', 'origin', trimmedRemote]);
-            }
-        }
-        catch (e) { }
-        // Fetch dari remote git
-        const fetchRes = await this.runGit(appFolder, ['fetch', trimmedRemote, this.BRANCH]);
-        if (fetchRes.exitCode !== 0) {
-            // Jika git fetch gagal karena spawn git ENOENT (Git tidak terinstal / tidak ada di PATH)
-            if (fetchRes.stderr?.includes('ENOENT') || fetchRes.stdout?.includes('ENOENT')) {
-                if (ghInfo) {
-                    try {
-                        const rawUrl = `https://raw.githubusercontent.com/${ghInfo.owner}/${ghInfo.repo}/main/version.txt`;
-                        const remoteVer = await this.fetchHttpsText(rawUrl);
-                        const isNewer = this.compareVersions(remoteVer, currentVersion) > 0;
-                        return {
-                            available: isNewer,
-                            commitsBehind: isNewer ? 1 : 0,
-                            currentVersion,
-                            remoteVersion: remoteVer,
-                            changelog: isNewer ? [`Pembaruan v${remoteVer} tersedia via HTTPS`] : [],
-                            error: null,
-                        };
-                    }
-                    catch (e) { }
-                }
-                return {
-                    available: false,
-                    commitsBehind: 0,
-                    currentVersion,
-                    error: 'Git tidak terpasang di komputer ini (spawn git ENOENT). Pasang Git for Windows atau gunakan Path Remote Share lokal (misal: \\\\server\\share\\ZeenIQ).',
-                };
-            }
-            // Jika git fetch gagal, coba fallback ke Git-Free HTTPS jika remote GitHub
-            if (ghInfo) {
-                try {
-                    const rawUrl = `https://raw.githubusercontent.com/${ghInfo.owner}/${ghInfo.repo}/main/version.txt`;
-                    const remoteVer = await this.fetchHttpsText(rawUrl);
-                    const isNewer = this.compareVersions(remoteVer, currentVersion) > 0;
-                    return {
-                        available: isNewer,
-                        commitsBehind: isNewer ? 1 : 0,
-                        currentVersion,
-                        remoteVersion: remoteVer,
-                        changelog: isNewer ? [`Pembaruan v${remoteVer} tersedia via HTTPS`] : [],
-                        error: null,
-                    };
                 }
                 catch (e) { }
+                return {
+                    available: isNewer,
+                    commitsBehind: isNewer ? Math.max(changelog.length, 1) : 0,
+                    currentVersion,
+                    remoteVersion: remoteVer,
+                    changelog,
+                    error: null,
+                };
             }
-            const sanitizedErr = this.redactRemote(this.firstLine(fetchRes.stderr || fetchRes.stdout), trimmedRemote);
-            return {
-                available: false,
-                commitsBehind: 0,
-                currentVersion,
-                error: `git fetch gagal: ${sanitizedErr}`,
-            };
-        }
-        // Hitung jumlah commit yang tertinggal
-        const countRes = await this.runGit(appFolder, ['rev-list', '--count', 'HEAD..FETCH_HEAD']);
-        const commitsBehind = countRes.exitCode === 0 ? parseInt(countRes.stdout.trim(), 10) || 0 : 0;
-        // Baca version.txt dari FETCH_HEAD
-        let remoteVersion;
-        try {
-            const showRes = await this.runGit(appFolder, ['show', 'FETCH_HEAD:version.txt']);
-            if (showRes.exitCode === 0 && showRes.stdout.trim()) {
-                remoteVersion = showRes.stdout.trim();
-            }
-            else {
-                const showAppRes = await this.runGit(appFolder, ['show', 'FETCH_HEAD:resources/app/version.txt']);
-                if (showAppRes.exitCode === 0 && showAppRes.stdout.trim()) {
-                    remoteVersion = showAppRes.stdout.trim();
-                }
+            catch (e) {
+                return {
+                    available: false,
+                    commitsBehind: 0,
+                    currentVersion,
+                    error: `Gagal memeriksa pembaruan dari server online (${e?.message || e}). Periksa koneksi internet Anda.`,
+                };
             }
         }
-        catch (e) { }
-        // Changelog
-        let changelog = [];
-        try {
-            const logRes = await this.runGit(appFolder, ['log', 'HEAD..FETCH_HEAD', '--pretty=format:%h - %s', '-n', '8']);
-            if (logRes.exitCode === 0 && logRes.stdout.trim()) {
-                changelog = logRes.stdout.trim().split('\n').filter(Boolean);
-            }
-        }
-        catch (e) { }
-        const isNewer = remoteVersion ? this.compareVersions(remoteVersion, currentVersion) > 0 : false;
-        // JIKA versi remote sama atau lebih rendah dari versi terpasang, aplikasi SUDAH MUTAKHIR (up to date).
-        // Jangan tampilkan update banner hanya karena ada perbedaan commit di repo.
-        const isUpdateAvailable = isNewer || (!remoteVersion && commitsBehind > 0);
         return {
-            available: isUpdateAvailable,
-            commitsBehind: isUpdateAvailable ? Math.max(commitsBehind, isNewer ? 1 : 0) : 0,
+            available: false,
+            commitsBehind: 0,
             currentVersion,
-            remoteVersion,
-            changelog: isUpdateAvailable ? changelog : [],
-            error: null,
+            error: 'Path remote pembaruan tidak valid atau tidak dapat diakses.',
         };
     }
     static DEFAULT_REMOTE_SHARE = 'https://github.com/imamqordlowi16/ZeeniQTools.git';
@@ -429,10 +319,54 @@ class UpdateService {
         }
         return extractDir;
     }
+    static sanitizeStagingFolder(stagingFolder) {
+        try {
+            const checkAndClean = (dir) => {
+                if (!fs_1.default.existsSync(dir))
+                    return;
+                const entries = fs_1.default.readdirSync(dir, { withFileTypes: true });
+                for (const entry of entries) {
+                    const fullPath = path_1.default.join(dir, entry.name);
+                    if (entry.isDirectory()) {
+                        // Hapus folder sistem internal atau data jika terbawa di staging
+                        if (['zeeniq_oracle_data', 'Data', 'data', 'logs', 'temp', '.git'].includes(entry.name)) {
+                            try {
+                                fs_1.default.rmSync(fullPath, { recursive: true, force: true });
+                            }
+                            catch (e) { }
+                            continue;
+                        }
+                        checkAndClean(fullPath);
+                    }
+                    else {
+                        // Deteksi teks pointer Git LFS (< 1000 byte dan diawali "version https://git-lfs")
+                        // Khususnya untuk file .exe, .dll, .bin, atau di folder instantclient
+                        const ext = path_1.default.extname(entry.name).toLowerCase();
+                        const isBinaryType = ['.exe', '.dll', '.bin', '.dat', '.pak'].includes(ext) || fullPath.includes('instantclient');
+                        if (isBinaryType) {
+                            try {
+                                const stat = fs_1.default.statSync(fullPath);
+                                if (stat.size < 1000) {
+                                    const content = fs_1.default.readFileSync(fullPath, 'utf8');
+                                    if (content.includes('git-lfs') || content.startsWith('version https://')) {
+                                        // Hapus file pointer Git LFS ini agar TIDAK menimpa binary asli di aplikasi!
+                                        fs_1.default.unlinkSync(fullPath);
+                                    }
+                                }
+                            }
+                            catch (e) { }
+                        }
+                    }
+                }
+            };
+            checkAndClean(stagingFolder);
+        }
+        catch (e) {
+            console.warn('Error sanitizing staging folder:', e);
+        }
+    }
     static async prepareAndLaunchUpdater(remote, appFolder, onLog) {
         const trimmedRemote = (remote || '').trim();
-        const gitAvailable = await this.hasGit();
-        const gitDir = path_1.default.join(appFolder, '.git');
         const ghInfo = this.parseGitHubRemote(trimmedRemote);
         // Kasus A: Remote adalah direktori lokal / network share UNC
         if (fs_1.default.existsSync(trimmedRemote) && !ghInfo) {
@@ -440,26 +374,25 @@ class UpdateService {
             this.launchUpdaterAndExit(trimmedRemote, appFolder);
             return;
         }
-        // Kasus B: Laptop TIDAK memiliki Git ATAU folder aplikasi bukan repo git (misal hasil instalasi installer)
-        if (!gitAvailable || !fs_1.default.existsSync(gitDir)) {
-            if (ghInfo) {
-                onLog?.('Git tidak terdeteksi di laptop ini. Memulai pengunduhan otomatis via HTTPS...');
-                const zipUrl = `https://codeload.github.com/${ghInfo.owner}/${ghInfo.repo}/zip/refs/heads/main`;
-                const tempBase = path_1.default.join(os_1.default.tmpdir(), `zeeniq_staging_${crypto_1.default.randomBytes(4).toString('hex')}`);
-                fs_1.default.mkdirSync(tempBase, { recursive: true });
-                try {
-                    const stagingFolder = await this.downloadAndExtractZip(zipUrl, tempBase, onLog);
-                    onLog?.('Pembaruan berhasil diekstrak ke staging lokal. Menjalankan updater mandiri...');
-                    // Jalankan updater dalam Mode A (Staging robocopy) - 100% tanpa Git!
-                    this.launchUpdaterAndExit(stagingFolder, appFolder);
-                    return;
-                }
-                catch (err) {
-                    onLog?.(`Peringatan: Unduhan langsung gagal (${err.message}). Mencoba updater internal...`);
-                }
+        // Kasus B: Remote adalah GitHub (Online) -> SELALU gunakan unduhan langsung HTTPS mandiri (Bebas Git & Bebas Login)
+        if (ghInfo) {
+            onLog?.('Mengunduh paket pembaruan langsung dari server online via HTTPS...');
+            const zipUrl = `https://codeload.github.com/${ghInfo.owner}/${ghInfo.repo}/zip/refs/heads/main`;
+            const tempBase = path_1.default.join(os_1.default.tmpdir(), `zeeniq_staging_${crypto_1.default.randomBytes(4).toString('hex')}`);
+            fs_1.default.mkdirSync(tempBase, { recursive: true });
+            try {
+                const stagingFolder = await this.downloadAndExtractZip(zipUrl, tempBase, onLog);
+                onLog?.('Memverifikasi integritas paket dan melindungi binary sistem...');
+                this.sanitizeStagingFolder(stagingFolder);
+                onLog?.('Pembaruan siap dipasang. Menjalankan updater mandiri...');
+                this.launchUpdaterAndExit(stagingFolder, appFolder);
+                return;
+            }
+            catch (err) {
+                onLog?.(`Peringatan: Unduhan via Node.js gagal (${err.message}). Mencoba updater mandiri...`);
             }
         }
-        // Kasus C: Git tersedia dan aplikasi adalah git repo, atau fallback
+        // Fallback: jalankan updater dengan remote yang tersedia
         this.launchUpdaterAndExit(trimmedRemote, appFolder);
     }
     static launchUpdaterAndExit(remote, appFolder) {
@@ -493,35 +426,22 @@ class UpdateService {
             child.unref();
         }
         else {
-            // Fallback: buat script updater batch mandiri di %TEMP%
+            // Fallback: buat script updater batch mandiri di %TEMP% (100% Bebas Git)
             const fallbackBat = path_1.default.join(tempDir, `ZeenIQDbTools.Updater_${guid}.bat`);
-            const exeName = 'ZeenIQ-Oracle-Tools.exe';
             const isDir = fs_1.default.existsSync(remote);
             let updateCommands = '';
             if (isDir) {
-                // Mode A Staging: robocopy
+                // Mode A Staging: robocopy (Exclude data, logs, temp, dan file LFS pointer)
                 updateCommands = `
-robocopy "${remote}" "%DEST%" /E /XD zeeniq_oracle_data Data logs temp /R:2 /W:1 /NFL /NDL >nul
+echo Menerapkan file pembaruan ke folder aplikasi...
+robocopy "${remote}" "%DEST%" /E /XD zeeniq_oracle_data Data data logs temp .git instantclient /XF electron.exe ZeenIQ-Oracle-Tools.exe ZeenIQ-Oracle-Tools-VIP.exe /R:2 /W:1 /NFL /NDL >nul
 `;
             }
             else {
-                // Mode B: Git atau PowerShell fallback jika git tidak ada
+                // Mode B: Unduhan via PowerShell murni (100% Bebas Git & Bebas Login)
                 updateCommands = `
-where git >nul 2>nul
-if %errorlevel% neq 0 (
-  echo Git tidak ditemukan. Mengunduh pembaruan via PowerShell...
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}; $zip = Join-Path $env:TEMP 'zeeniq_up.zip'; $dir = Join-Path $env:TEMP 'zeeniq_up'; Remove-Item -Force -Recurse $dir -ErrorAction SilentlyContinue; Invoke-WebRequest -Uri 'https://codeload.github.com/imamqordlowi16/ZeeniQDBPortabelTools/zip/refs/heads/main' -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $dir -Force; $src = (Get-ChildItem -Path $dir | Select-Object -First 1).FullName; robocopy $src '%DEST%' /E /XD zeeniq_oracle_data Data logs temp /R:2 /W:1 /NFL /NDL; Remove-Item -Force $zip; Remove-Item -Force -Recurse $dir;"
-) else (
-  cd /d "%DEST%"
-  if exist ".git\\index.lock" del /f /q ".git\\index.lock" >nul 2>nul
-  if not exist ".git" (
-    git init -b main
-    git remote add origin "%REMOTE%"
-  )
-  git fetch origin main
-  git reset --hard origin/main
-  git clean -fd
-)
+echo Mengunduh pembaruan online secara mandiri via HTTPS...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}; $zip = Join-Path $env:TEMP 'zeeniq_up.zip'; $dir = Join-Path $env:TEMP 'zeeniq_up'; Remove-Item -Force -Recurse $dir -ErrorAction SilentlyContinue; Invoke-WebRequest -Uri 'https://codeload.github.com/imamqordlowi16/ZeeniQDBPortabelTools/zip/refs/heads/main' -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $dir -Force; $src = (Get-ChildItem -Path $dir | Select-Object -First 1).FullName; Get-ChildItem -Path $src -Recurse | Where-Object { $_.Length -lt 1000 -and (Select-String -Path $_.FullName -Pattern 'git-lfs' -Quiet) } | Remove-Item -Force; robocopy $src '%DEST%' /E /XD zeeniq_oracle_data Data data logs temp .git instantclient /XF electron.exe ZeenIQ-Oracle-Tools.exe ZeenIQ-Oracle-Tools-VIP.exe /R:2 /W:1 /NFL /NDL; Remove-Item -Force $zip; Remove-Item -Force -Recurse $dir;"
 `;
             }
             const batContent = `@echo off
@@ -589,7 +509,12 @@ exit /b 0
     }
     static runGit(workDir, args, onData) {
         return new Promise((resolve) => {
-            const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+            const env = {
+                ...process.env,
+                GIT_TERMINAL_PROMPT: '0',
+                GCM_INTERACTIVE: 'never',
+                GIT_CONFIG_PARAMETERS: "'credential.helper='",
+            };
             const child = (0, child_process_1.spawn)('git', args, {
                 cwd: workDir,
                 env,
