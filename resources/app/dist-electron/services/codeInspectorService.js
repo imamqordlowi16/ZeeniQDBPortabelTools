@@ -345,6 +345,151 @@ class CodeInspectorService {
         return lines.slice(start, end).join('\n');
     }
     /**
+     * Helper to format PascalCase or camelCase into spaced title
+     */
+    formatReadableName(str) {
+        if (!str)
+            return '';
+        const clean = str
+            .replace(/\.(aspx|ascx|ashx|asax|cs|vb|sql|ts|js)$/gi, '')
+            .replace(/^(btn|bnt|txt|ddl|lbl|chk|grid|tbl|form)_?/i, '');
+        return clean
+            .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+            .replace(/_/g, ' ')
+            .trim();
+    }
+    /**
+     * Infer menu breadcrumb and layer type from relative file path
+     */
+    inferMenuBreadcrumb(relFile) {
+        const parts = relFile.split(/[/\\]+/).filter(Boolean);
+        let layerType = 'OTHER';
+        if (parts.some((p) => p.toLowerCase() === 'pages' || p.toLowerCase() === 'masterpages')) {
+            layerType = 'UI_PAGE';
+        }
+        else if (parts.some((p) => p.toLowerCase() === 'businesslogic')) {
+            layerType = 'BUSINESS_LOGIC';
+        }
+        else if (parts.some((p) => p.toLowerCase() === 'service' || p.toLowerCase() === 'services')) {
+            layerType = 'SERVICE';
+        }
+        else if (parts.some((p) => p.toLowerCase() === 'reporting' || p.toLowerCase() === 'laporan' || p.toLowerCase() === 'report')) {
+            layerType = 'REPORT';
+        }
+        // Filter out generic structural folder names
+        const filtered = parts
+            .filter((p) => !['pages', 'businesslogic', 'service', 'services', 'reporting', 'runtime', 'sys', 'static'].includes(p.toLowerCase()))
+            .map((p) => this.formatReadableName(p));
+        const menuBreadcrumb = filtered.join(' > ') || this.formatReadableName(path_1.default.basename(relFile));
+        return { menuBreadcrumb, layerType };
+    }
+    /**
+     * Find enclosing C# / VB class and method
+     */
+    findEnclosingContext(content, charIndex) {
+        const before = content.substring(0, charIndex);
+        // Class
+        const classMatches = [...before.matchAll(/class\s+([a-zA-Z0-9_]+)/g)];
+        const enclosingClass = classMatches.length > 0 ? classMatches[classMatches.length - 1][1] : undefined;
+        // Method
+        const methodRegex = /^\s*(?:\[[^\]]+\]\s*)*(?:public|private|protected|internal|static|async|override|virtual)\s+[^=\n;]+?\b([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*(?:where[^{]+)?\{?/gm;
+        const methodMatches = [...before.matchAll(methodRegex)];
+        const enclosingMethod = methodMatches.length > 0 ? methodMatches[methodMatches.length - 1][1] : undefined;
+        return { enclosingClass, enclosingMethod };
+    }
+    /**
+     * Infer business process flow & stage
+     */
+    inferProcessFlow(methodName, queryType, sql, menuBreadcrumb) {
+        const mLower = (methodName || '').toLowerCase();
+        const sqlLower = sql.toLowerCase();
+        if (mLower.includes('approve') ||
+            mLower.includes('reject') ||
+            mLower.includes('otorisasi') ||
+            mLower.includes('verifikasi') ||
+            mLower.includes('notif') ||
+            sqlLower.includes('show_notif_approval') ||
+            sqlLower.includes('status_approval')) {
+            return {
+                processStage: 'APPROVAL',
+                processStageLabel: '✅ Approval & Otorisasi',
+                processFlowSummary: `Dijalankan pada alur verifikasi / approval data oleh pengguna pada menu ${menuBreadcrumb}.`,
+            };
+        }
+        if (mLower.includes('download') ||
+            mLower.includes('export') ||
+            mLower.includes('cetak') ||
+            mLower.includes('print') ||
+            mLower.includes('report') ||
+            mLower.includes('pdf') ||
+            mLower.includes('excel')) {
+            return {
+                processStage: 'EXPORT_REPORT',
+                processStageLabel: '📊 Export & Cetak Laporan',
+                processFlowSummary: `Dijalankan saat pengguna mengunduh laporan (${methodName || 'Cetak'}) dari menu ${menuBreadcrumb}.`,
+            };
+        }
+        if (mLower.includes('combo') ||
+            mLower.includes('dropdown') ||
+            mLower.includes('init') ||
+            mLower.includes('load') ||
+            mLower.includes('lookup') ||
+            mLower.includes('kalender') ||
+            mLower.includes('default')) {
+            return {
+                processStage: 'INITIALIZATION',
+                processStageLabel: '⚙️ Inisialisasi & Form Load',
+                processFlowSummary: `Dijalankan saat halaman pertama kali dimuat (${methodName || 'Init'}) untuk mengisi pilihan dropdown menu ${menuBreadcrumb}.`,
+            };
+        }
+        if (queryType === 'INSERT' ||
+            mLower.includes('save') ||
+            mLower.includes('insert') ||
+            mLower.includes('tambah') ||
+            mLower.includes('simpan') ||
+            mLower.includes('create')) {
+            return {
+                processStage: 'INSERT_DATA',
+                processStageLabel: '💾 Tambah / Simpan Data Baru',
+                processFlowSummary: `Dijalankan saat pengguna menekan tombol Simpan / Submit untuk menambahkan data baru ke database pada menu ${menuBreadcrumb}.`,
+            };
+        }
+        if (queryType === 'UPDATE' ||
+            mLower.includes('update') ||
+            mLower.includes('ubah') ||
+            mLower.includes('edit') ||
+            mLower.includes('modify')) {
+            return {
+                processStage: 'UPDATE_DATA',
+                processStageLabel: '✏️ Update / Ubah Data',
+                processFlowSummary: `Dijalankan saat pengguna memperbarui data melalui formulir edit pada menu ${menuBreadcrumb}.`,
+            };
+        }
+        if (queryType === 'DELETE' ||
+            mLower.includes('delete') ||
+            mLower.includes('hapus') ||
+            mLower.includes('remove') ||
+            mLower.includes('batal')) {
+            return {
+                processStage: 'DELETE_DATA',
+                processStageLabel: '🗑️ Hapus Data',
+                processFlowSummary: `Dijalankan saat pengguna menghapus atau membatalkan data dari menu ${menuBreadcrumb}.`,
+            };
+        }
+        if (queryType === 'SELECT') {
+            return {
+                processStage: 'SEARCH_READ',
+                processStageLabel: '📥 Pencarian & Tampil Grid',
+                processFlowSummary: `Dijalankan saat pengguna membuka menu ${menuBreadcrumb} atau menekan tombol Cari untuk menampilkan data ke tabel/grid.`,
+            };
+        }
+        return {
+            processStage: 'PROCESS',
+            processStageLabel: '🔄 Proses Bisnis',
+            processFlowSummary: `Dijalankan pada fungsi logic ${methodName || 'eksekusi'} terkait modul ${menuBreadcrumb}.`,
+        };
+    }
+    /**
      * Scan single source file for embedded SQL and stored procedures
      */
     scanSourceFile(filePath, relFile) {
@@ -354,6 +499,7 @@ class CodeInspectorService {
             if (content.length > 3 * 1024 * 1024)
                 return []; // Skip files > 3MB
             const lines = content.split(/\r?\n/);
+            const { menuBreadcrumb, layerType } = this.inferMenuBreadcrumb(relFile);
             // Regex 1: C# Multiline verbatim strings @"SELECT ... " or @"INSERT ... "
             const verbatimSqlRegex = /@"(?:\s*)(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO)\b([\s\S]*?)"/gi;
             let match;
@@ -375,6 +521,8 @@ class CodeInspectorService {
                         qType = 'DELETE';
                     else if (keyword.startsWith('MERGE'))
                         qType = 'MERGE';
+                    const { enclosingClass, enclosingMethod } = this.findEnclosingContext(content, match.index);
+                    const { processStage, processStageLabel, processFlowSummary } = this.inferProcessFlow(enclosingMethod, qType, sql, menuBreadcrumb);
                     queries.push({
                         id: `sql-${Buffer.from(relFile + lineNum + counter++).toString('hex').substring(0, 10)}`,
                         name: `${qType} (${entities.tables[0] || path_1.default.basename(relFile)})`,
@@ -386,6 +534,13 @@ class CodeInspectorService {
                         codeContextSnippet: this.getSnippet(lines, lineNum),
                         referencedTables: entities.tables,
                         referencedProcedures: entities.procedures,
+                        menuBreadcrumb,
+                        layerType,
+                        enclosingClass,
+                        enclosingMethod,
+                        processStage,
+                        processStageLabel,
+                        processFlowSummary,
                     });
                 }
             }
@@ -408,6 +563,8 @@ class CodeInspectorService {
                             qType = 'DELETE';
                         else if (keyword.startsWith('MERGE'))
                             qType = 'MERGE';
+                        const { enclosingClass, enclosingMethod } = this.findEnclosingContext(content, match.index);
+                        const { processStage, processStageLabel, processFlowSummary } = this.inferProcessFlow(enclosingMethod, qType, sql, menuBreadcrumb);
                         queries.push({
                             id: `sql-${Buffer.from(relFile + lineNum + counter++).toString('hex').substring(0, 10)}`,
                             name: `${qType} (${entities.tables[0] || path_1.default.basename(relFile)})`,
@@ -419,6 +576,13 @@ class CodeInspectorService {
                             codeContextSnippet: this.getSnippet(lines, lineNum),
                             referencedTables: entities.tables,
                             referencedProcedures: entities.procedures,
+                            menuBreadcrumb,
+                            layerType,
+                            enclosingClass,
+                            enclosingMethod,
+                            processStage,
+                            processStageLabel,
+                            processFlowSummary,
                         });
                     }
                 }
@@ -432,6 +596,8 @@ class CodeInspectorService {
                 const nearby = content.substring(Math.max(0, match.index - 200), Math.min(content.length, match.index + 200));
                 if (nearby.includes('StoredProcedure') && procName.length > 2) {
                     const lineNum = this.getLineNumber(content, match.index);
+                    const { enclosingClass, enclosingMethod } = this.findEnclosingContext(content, match.index);
+                    const { processStage, processStageLabel, processFlowSummary } = this.inferProcessFlow(enclosingMethod, 'PROCEDURE', `EXEC ${procName}`, menuBreadcrumb);
                     queries.push({
                         id: `sp-${Buffer.from(relFile + lineNum + counter++).toString('hex').substring(0, 10)}`,
                         name: `PROCEDURE (${procName})`,
@@ -443,6 +609,13 @@ class CodeInspectorService {
                         codeContextSnippet: this.getSnippet(lines, lineNum),
                         referencedTables: [],
                         referencedProcedures: [procName],
+                        menuBreadcrumb,
+                        layerType,
+                        enclosingClass,
+                        enclosingMethod,
+                        processStage,
+                        processStageLabel,
+                        processFlowSummary,
                     });
                 }
             }
