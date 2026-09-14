@@ -19,6 +19,7 @@ const licenseManager_1 = require("./services/licenseManager");
 const txtBundleService_1 = require("./services/txtBundleService");
 const multiDbService_1 = require("./services/multiDbService");
 const ssisService_1 = require("./services/ssisService");
+const codeInspectorService_1 = require("./services/codeInspectorService");
 const sshTunnelService_1 = require("./services/sshTunnelService");
 function writeLog(msg) {
     const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -1040,4 +1041,8 @@ electron_1.ipcMain.handle('ssis:cancel-job', async (_event, jobId) => {
     if (!ssisService)
         return false;
     return ssisService.cancelJob(jobId);
+});
+// ==================== CODEBASE & APP DB INSPECTOR HANDLERS ====================
+electron_1.ipcMain.handle('code-inspector:scan', async (_event, folderPath) => {
+    return codeInspectorService_1.codeInspectorService.scanFolder(folderPath);
 });

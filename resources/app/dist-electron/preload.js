@@ -133,6 +133,8 @@ const electronAPI = {
             electron_1.ipcRenderer.removeListener('ssis:log', listener);
         };
     },
+    // Codebase & Application DB Inspector
+    codeInspectorScan: (folderPath) => electron_1.ipcRenderer.invoke('code-inspector:scan', folderPath),
     // Licensing & Commercial Protection
     getMachineId: () => electron_1.ipcRenderer.invoke('license:get-machine-id'),
     getActiveLicense: () => electron_1.ipcRenderer.invoke('license:get-active'),
