@@ -12,6 +12,7 @@ class CodeInspectorService {
         'obj',
         '.git',
         '.vs',
+        '.vscode',
         'node_modules',
         'dist',
         'packages',
@@ -21,6 +22,16 @@ class CodeInspectorService {
         'coverage',
         'aspnet_client',
         'assets',
+        'vendor',
+        'bower_components',
+        'lib',
+        'libs',
+        'bundle',
+        'bundles',
+        'fonts',
+        'images',
+        'img',
+        'static',
     ]);
     sourceCodeExtensions = new Set([
         '.cs',
@@ -106,8 +117,8 @@ class CodeInspectorService {
                 }
             }
         }
-        // 3. Standalone functions with naming conventions (GET_, FN_, UDF_, FUNC_, SF_, IS_, CALC_, etc.)
-        const namedFuncRegex = /\b((?:FN_|UDF_|FUNC_|SF_|GET_|IS_|CALC_|HITUNG_|CEK_|GENERATE_|SHOW_)[a-zA-Z0-9_]+)\s*\(/gi;
+        // 3. Standalone functions with naming conventions (DSSK_, GET_, FN_, UDF_, FUNC_, SF_, IS_, CALC_, etc.)
+        const namedFuncRegex = /\b((?:DSSK_|FN_|UDF_|FUNC_|SF_|GET_|IS_|CALC_|HITUNG_|CEK_|GENERATE_|SHOW_)[a-zA-Z0-9_]+)\s*\(/gi;
         while ((match = namedFuncRegex.exec(sql)) !== null) {
             let f = match[1]?.trim();
             if (f) {
@@ -395,25 +406,50 @@ class CodeInspectorService {
      * Infer menu breadcrumb and layer type from relative file path
      */
     inferMenuBreadcrumb(relFile) {
-        const parts = relFile.split(/[/\\]+/).filter(Boolean);
+        const rawParts = relFile.split(/[/\\]+/).filter(Boolean);
         let layerType = 'OTHER';
-        if (parts.some((p) => p.toLowerCase() === 'pages' || p.toLowerCase() === 'masterpages')) {
+        if (rawParts.some((p) => p.toLowerCase() === 'pages' || p.toLowerCase() === 'masterpages')) {
             layerType = 'UI_PAGE';
         }
-        else if (parts.some((p) => p.toLowerCase() === 'businesslogic')) {
+        else if (rawParts.some((p) => p.toLowerCase() === 'businesslogic')) {
             layerType = 'BUSINESS_LOGIC';
         }
-        else if (parts.some((p) => p.toLowerCase() === 'service' || p.toLowerCase() === 'services')) {
+        else if (rawParts.some((p) => p.toLowerCase() === 'service' || p.toLowerCase() === 'services')) {
             layerType = 'SERVICE';
         }
-        else if (parts.some((p) => p.toLowerCase() === 'reporting' || p.toLowerCase() === 'laporan' || p.toLowerCase() === 'report')) {
+        else if (rawParts.some((p) => p.toLowerCase() === 'reporting' || p.toLowerCase() === 'laporan' || p.toLowerCase() === 'report')) {
             layerType = 'REPORT';
         }
         // Filter out generic structural folder names
-        const filtered = parts
-            .filter((p) => !['pages', 'businesslogic', 'service', 'services', 'reporting', 'runtime', 'sys', 'static'].includes(p.toLowerCase()))
-            .map((p) => this.formatReadableName(p));
-        const menuBreadcrumb = filtered.join(' > ') || this.formatReadableName(path_1.default.basename(relFile));
+        const ignoredFolders = new Set([
+            'pages', 'masterpages', 'businesslogic', 'service', 'services',
+            'reporting', 'runtime', 'sys', 'static', 'bin', 'obj', 'properties',
+            'app_code', 'app_data', 'scripts', 'content', 'views', 'controllers'
+        ]);
+        const formattedParts = [];
+        for (let i = 0; i < rawParts.length; i++) {
+            const p = rawParts[i];
+            const pLower = p.toLowerCase();
+            if (ignoredFolders.has(pLower))
+                continue;
+            let cleanName = p;
+            if (i === rawParts.length - 1) {
+                // Strip code file extensions (.aspx.cs, .aspx, .cs, .vb, etc.)
+                cleanName = cleanName.replace(/\.(aspx|ascx|asmx|ashx)?\.(cs|vb)$/i, '').replace(/\.(aspx|ascx|asmx|ashx|cs|vb)$/i, '');
+            }
+            const formatted = this.formatReadableName(cleanName);
+            if (formatted) {
+                formattedParts.push(formatted);
+            }
+        }
+        // Deduplicate consecutive identical segments (e.g. ['siska', 'Siska'] -> ['Siska'])
+        const deduplicated = [];
+        for (const part of formattedParts) {
+            if (deduplicated.length === 0 || deduplicated[deduplicated.length - 1].toLowerCase() !== part.toLowerCase()) {
+                deduplicated.push(part);
+            }
+        }
+        const menuBreadcrumb = deduplicated.join(' > ') || this.formatReadableName(path_1.default.basename(relFile));
         return { menuBreadcrumb, layerType };
     }
     /**
@@ -436,6 +472,7 @@ class CodeInspectorService {
     inferProcessFlow(methodName, queryType, sql, menuBreadcrumb) {
         const mLower = (methodName || '').toLowerCase();
         const sqlLower = sql.toLowerCase();
+        const methodDisplay = methodName ? `${methodName}()` : '';
         if (mLower.includes('approve') ||
             mLower.includes('reject') ||
             mLower.includes('otorisasi') ||
@@ -446,7 +483,7 @@ class CodeInspectorService {
             return {
                 processStage: 'APPROVAL',
                 processStageLabel: '✅ Approval & Otorisasi',
-                processFlowSummary: `Dijalankan pada alur verifikasi / approval data oleh pengguna pada menu ${menuBreadcrumb}.`,
+                processFlowSummary: `Dijalankan pada alur verifikasi / approval data oleh pengguna pada menu ${menuBreadcrumb}${methodDisplay ? ` via fungsi ${methodDisplay}` : ''}.`,
             };
         }
         if (mLower.includes('download') ||
@@ -459,7 +496,7 @@ class CodeInspectorService {
             return {
                 processStage: 'EXPORT_REPORT',
                 processStageLabel: '📊 Export & Cetak Laporan',
-                processFlowSummary: `Dijalankan saat pengguna mengunduh laporan (${methodName || 'Cetak'}) dari menu ${menuBreadcrumb}.`,
+                processFlowSummary: `Dijalankan saat pengguna mengunduh / mencetak laporan${methodDisplay ? ` (${methodDisplay})` : ''} dari menu ${menuBreadcrumb}.`,
             };
         }
         if (mLower.includes('combo') ||
@@ -472,7 +509,7 @@ class CodeInspectorService {
             return {
                 processStage: 'INITIALIZATION',
                 processStageLabel: '⚙️ Inisialisasi & Form Load',
-                processFlowSummary: `Dijalankan saat halaman pertama kali dimuat (${methodName || 'Init'}) untuk mengisi pilihan dropdown menu ${menuBreadcrumb}.`,
+                processFlowSummary: `Dijalankan saat halaman pertama kali dimuat${methodDisplay ? ` (${methodDisplay})` : ''} untuk mengisi pilihan dropdown menu ${menuBreadcrumb}.`,
             };
         }
         if (queryType === 'INSERT' ||
@@ -484,7 +521,7 @@ class CodeInspectorService {
             return {
                 processStage: 'INSERT_DATA',
                 processStageLabel: '💾 Tambah / Simpan Data Baru',
-                processFlowSummary: `Dijalankan saat pengguna menekan tombol Simpan / Submit untuk menambahkan data baru ke database pada menu ${menuBreadcrumb}.`,
+                processFlowSummary: `Dijalankan saat pengguna menekan tombol Simpan / Submit${methodDisplay ? ` via ${methodDisplay}` : ''} untuk menambahkan data baru ke database pada menu ${menuBreadcrumb}.`,
             };
         }
         if (queryType === 'UPDATE' ||
@@ -495,7 +532,7 @@ class CodeInspectorService {
             return {
                 processStage: 'UPDATE_DATA',
                 processStageLabel: '✏️ Update / Ubah Data',
-                processFlowSummary: `Dijalankan saat pengguna memperbarui data melalui formulir edit pada menu ${menuBreadcrumb}.`,
+                processFlowSummary: `Dijalankan saat pengguna memperbarui data melalui formulir edit${methodDisplay ? ` via ${methodDisplay}` : ''} pada menu ${menuBreadcrumb}.`,
             };
         }
         if (queryType === 'DELETE' ||
@@ -506,21 +543,122 @@ class CodeInspectorService {
             return {
                 processStage: 'DELETE_DATA',
                 processStageLabel: '🗑️ Hapus Data',
-                processFlowSummary: `Dijalankan saat pengguna menghapus atau membatalkan data dari menu ${menuBreadcrumb}.`,
+                processFlowSummary: `Dijalankan saat pengguna menghapus atau membatalkan data${methodDisplay ? ` via ${methodDisplay}` : ''} dari menu ${menuBreadcrumb}.`,
+            };
+        }
+        if (mLower.includes('lastdate') || mLower.includes('getdate') || mLower.includes('cutoff')) {
+            return {
+                processStage: 'SEARCH_READ',
+                processStageLabel: '📅 Ambil Tanggal Posisi Data',
+                processFlowSummary: `Dijalankan melalui fungsi ${methodDisplay || 'GetDate'} untuk mengambil tanggal posisi/cut-off terakhir data pada menu ${menuBreadcrumb}.`,
+            };
+        }
+        if (mLower.includes('count')) {
+            return {
+                processStage: 'SEARCH_READ',
+                processStageLabel: '🔢 Hitung Total Record / Paging',
+                processFlowSummary: `Dijalankan melalui fungsi ${methodDisplay || 'Count'} untuk menghitung total jumlah data (pagination/ringkasan) pada menu ${menuBreadcrumb}.`,
+            };
+        }
+        if (mLower.includes('grid') || mLower.includes('rekap') || mLower.includes('struktur') || mLower.includes('posisi') || mLower.includes('modal') || mLower.includes('analis')) {
+            return {
+                processStage: 'SEARCH_READ',
+                processStageLabel: '📥 Pencarian & Tampil Grid',
+                processFlowSummary: `Dijalankan melalui fungsi ${methodDisplay || 'LoadGrid'} saat memuat tampilan data grid / rekapitulasi pada menu ${menuBreadcrumb}.`,
             };
         }
         if (queryType === 'SELECT') {
             return {
                 processStage: 'SEARCH_READ',
                 processStageLabel: '📥 Pencarian & Tampil Grid',
-                processFlowSummary: `Dijalankan saat pengguna membuka menu ${menuBreadcrumb} atau menekan tombol Cari untuk menampilkan data ke tabel/grid.`,
+                processFlowSummary: `Dijalankan saat pengguna membuka menu ${menuBreadcrumb}${methodDisplay ? ` via ${methodDisplay}` : ''} atau menekan tombol Cari untuk menampilkan data ke tabel/grid.`,
             };
         }
         return {
             processStage: 'PROCESS',
             processStageLabel: '🔄 Proses Bisnis',
-            processFlowSummary: `Dijalankan pada fungsi logic ${methodName || 'eksekusi'} terkait modul ${menuBreadcrumb}.`,
+            processFlowSummary: `Dijalankan pada fungsi logic ${methodDisplay || 'eksekusi'} terkait modul ${menuBreadcrumb}.`,
         };
+    }
+    /**
+     * Smart resolver for dynamic SQL string.Format arguments, e.g.
+     * string.Format(@"SELECT * FROM TABLE({0}({1}, {2}, {3}))", arg0, ...)
+     * or "SELECT * FROM TABLE({0}(...))"
+     */
+    resolveDynamicSql(rawSql, content, matchIndex, fullMatchLength, enclosingMethod) {
+        let sql = rawSql;
+        const dynamicFunctions = [];
+        // Check if SQL contains dynamic placeholders like {0}
+        if (!sql.includes('{0}')) {
+            return { sql, dynamicFunctions };
+        }
+        // Look at code immediately following the string literal (within 600 characters)
+        const afterCode = content.substring(matchIndex + fullMatchLength, Math.min(content.length, matchIndex + fullMatchLength + 600));
+        // Check if followed by comma and first argument in string.Format or method call:
+        // e.g. , "DSSK_KELOMPOK_BANK" or , functionName or , Constant.DSSK_...
+        const argMatch = /^\s*,\s*([^,\r\n;]+?)(?:,|\)|;|\r|\n)/.exec(afterCode);
+        let resolvedName = '';
+        if (argMatch) {
+            const rawArg = argMatch[1].trim();
+            // Case 1: String literal, e.g. "DSSK_KELOMPOK_BANK" or @"DSSK_..."
+            if (/^@?["'][^"']+["']$/.test(rawArg)) {
+                resolvedName = rawArg.replace(/^@?["']|["']$/g, '').trim();
+            }
+            else {
+                // Case 2: Identifier / variable / property, e.g. arg0, functionName, Constant.DSSK_FUNC
+                const varName = rawArg.split('.').pop()?.trim() || '';
+                // If variable name itself is in UPPER_SNAKE_CASE (e.g. DSSK_KELOMPOK_BANK_BYDATEUSER)
+                if (/^[A-Z0-9_]{3,}$/.test(varName)) {
+                    resolvedName = varName;
+                }
+                else if (varName) {
+                    // Look backward in the method/content for: varName = "..." or varName = @"..."
+                    const beforeCode = content.substring(Math.max(0, matchIndex - 2500), matchIndex);
+                    const assignRegex = new RegExp(`\\b${varName}\\s*=\\s*@?["']([^"']+)["']`, 'i');
+                    const assignMatch = assignRegex.exec(beforeCode);
+                    if (assignMatch) {
+                        resolvedName = assignMatch[1].trim();
+                    }
+                    else {
+                        // Also search forward within current method (up to 1500 chars)
+                        const forwardAssignMatch = assignRegex.exec(afterCode);
+                        if (forwardAssignMatch) {
+                            resolvedName = forwardAssignMatch[1].trim();
+                        }
+                        else {
+                            // Search class-wide constants
+                            const constRegex = new RegExp(`\\b(?:const\\s+string|readonly\\s+string|string)\\s+${varName}\\s*=\\s*@?["']([^"']+)["']`, 'i');
+                            const constMatch = constRegex.exec(content);
+                            if (constMatch) {
+                                resolvedName = constMatch[1].trim();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Case 3: If still not resolved, check if enclosing method has any function-like string literal
+        // (e.g. "DSSK_...", "FN_...") defined nearby within 2000 chars before the SQL
+        if (!resolvedName && enclosingMethod) {
+            const nearbyCode = content.substring(Math.max(0, matchIndex - 1500), Math.min(content.length, matchIndex + fullMatchLength + 300));
+            const fnLiteralMatch = /@?["']\b((?:DSSK_|FN_|SF_|FUNC_|UDF_|GET_|SHOW_|HITUNG_|CEK_)[A-Za-z0-9_]+)\b["']/i.exec(nearbyCode);
+            if (fnLiteralMatch) {
+                resolvedName = fnLiteralMatch[1].trim();
+            }
+        }
+        if (resolvedName) {
+            // Replace {0} with the resolved function name in SQL
+            sql = sql.replace(/\{0\}/g, resolvedName);
+            dynamicFunctions.push(resolvedName);
+        }
+        else {
+            // If unable to resolve exact name, make the SQL and function explicit instead of cryptic {0}
+            if (sql.includes('TABLE({0}')) {
+                const fallbackLabel = enclosingMethod ? `Dynamic Function (${enclosingMethod}())` : 'Dynamic Oracle Table Function';
+                dynamicFunctions.push(fallbackLabel);
+            }
+        }
+        return { sql, dynamicFunctions };
     }
     /**
      * Scan single source file for embedded SQL and stored procedures
@@ -529,9 +667,26 @@ class CodeInspectorService {
         const queries = [];
         try {
             const content = fs_1.default.readFileSync(filePath, 'utf8');
-            if (content.length > 3 * 1024 * 1024)
-                return []; // Skip files > 3MB
-            const lines = content.split(/\r?\n/);
+            if (content.length > 2 * 1024 * 1024)
+                return []; // Skip files > 2MB
+            // Fast check: Quickly skip files without any SQL keywords or SP calls
+            const upperQuick = content.toUpperCase();
+            const hasPossibleSql = upperQuick.includes('SELECT') ||
+                upperQuick.includes('INSERT') ||
+                upperQuick.includes('UPDATE') ||
+                upperQuick.includes('DELETE') ||
+                upperQuick.includes('MERGE') ||
+                upperQuick.includes('EXEC') ||
+                upperQuick.includes('COMMANDTEXT') ||
+                upperQuick.includes('STOREDPROCEDURE');
+            if (!hasPossibleSql)
+                return [];
+            let cachedLines = null;
+            const getLines = () => {
+                if (!cachedLines)
+                    cachedLines = content.split(/\r?\n/);
+                return cachedLines;
+            };
             const { menuBreadcrumb, layerType } = this.inferMenuBreadcrumb(relFile);
             // Regex 1: C# Multiline verbatim strings @"SELECT ... " or @"INSERT ... "
             const verbatimSqlRegex = /@"(?:\s*)(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO)\b([\s\S]*?)"/gi;
@@ -544,7 +699,16 @@ class CodeInspectorService {
                 sql = sql.replace(/""/g, '"').trim();
                 if (sql.length > 15) {
                     const lineNum = this.getLineNumber(content, match.index);
+                    const { enclosingClass, enclosingMethod } = this.findEnclosingContext(content, match.index);
+                    // Smart resolver for dynamic SQL string.Format arguments (e.g. TABLE({0}(...)))
+                    const { sql: resolvedSql, dynamicFunctions } = this.resolveDynamicSql(sql, content, match.index, fullMatch.length, enclosingMethod);
+                    sql = resolvedSql;
                     const entities = this.extractSqlEntities(sql);
+                    for (const df of dynamicFunctions) {
+                        if (!entities.functions.includes(df)) {
+                            entities.functions.push(df);
+                        }
+                    }
                     let qType = 'SELECT';
                     if (keyword.startsWith('INSERT'))
                         qType = 'INSERT';
@@ -554,17 +718,17 @@ class CodeInspectorService {
                         qType = 'DELETE';
                     else if (keyword.startsWith('MERGE'))
                         qType = 'MERGE';
-                    const { enclosingClass, enclosingMethod } = this.findEnclosingContext(content, match.index);
                     const { processStage, processStageLabel, processFlowSummary } = this.inferProcessFlow(enclosingMethod, qType, sql, menuBreadcrumb);
+                    const targetIdentifier = entities.tables[0] || entities.procedures[0] || entities.functions[0] || path_1.default.basename(relFile);
                     queries.push({
                         id: `sql-${Buffer.from(relFile + lineNum + counter++).toString('hex').substring(0, 10)}`,
-                        name: `${qType} (${entities.tables[0] || path_1.default.basename(relFile)})`,
+                        name: `${qType} (${targetIdentifier})`,
                         type: qType,
                         sql,
                         sourceFile: filePath,
                         relativeSourceFile: relFile,
                         lineNumber: lineNum,
-                        codeContextSnippet: this.getSnippet(lines, lineNum),
+                        codeContextSnippet: this.getSnippet(getLines(), lineNum),
                         referencedTables: entities.tables,
                         referencedProcedures: entities.procedures,
                         referencedFunctions: entities.functions,
@@ -582,12 +746,21 @@ class CodeInspectorService {
             const standardSqlRegex = /"(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO)\s+([^"\r\n]+)"/gi;
             while ((match = standardSqlRegex.exec(content)) !== null) {
                 const keyword = match[1].toUpperCase();
-                const sql = (match[1] + ' ' + match[2]).trim();
+                let sql = (match[1] + ' ' + match[2]).trim();
                 if (sql.length > 20 && !sql.toLowerCase().includes('select * from dual')) {
                     const lineNum = this.getLineNumber(content, match.index);
                     // Avoid duplicate if already matched by verbatim
                     if (!queries.some((q) => q.relativeSourceFile === relFile && Math.abs(q.lineNumber - lineNum) <= 1)) {
+                        const { enclosingClass, enclosingMethod } = this.findEnclosingContext(content, match.index);
+                        // Smart resolver for dynamic SQL
+                        const { sql: resolvedSql, dynamicFunctions } = this.resolveDynamicSql(sql, content, match.index, match[0].length, enclosingMethod);
+                        sql = resolvedSql;
                         const entities = this.extractSqlEntities(sql);
+                        for (const df of dynamicFunctions) {
+                            if (!entities.functions.includes(df)) {
+                                entities.functions.push(df);
+                            }
+                        }
                         let qType = 'SELECT';
                         if (keyword.startsWith('INSERT'))
                             qType = 'INSERT';
@@ -597,17 +770,17 @@ class CodeInspectorService {
                             qType = 'DELETE';
                         else if (keyword.startsWith('MERGE'))
                             qType = 'MERGE';
-                        const { enclosingClass, enclosingMethod } = this.findEnclosingContext(content, match.index);
                         const { processStage, processStageLabel, processFlowSummary } = this.inferProcessFlow(enclosingMethod, qType, sql, menuBreadcrumb);
+                        const targetIdentifier = entities.tables[0] || entities.procedures[0] || entities.functions[0] || path_1.default.basename(relFile);
                         queries.push({
                             id: `sql-${Buffer.from(relFile + lineNum + counter++).toString('hex').substring(0, 10)}`,
-                            name: `${qType} (${entities.tables[0] || path_1.default.basename(relFile)})`,
+                            name: `${qType} (${targetIdentifier})`,
                             type: qType,
                             sql,
                             sourceFile: filePath,
                             relativeSourceFile: relFile,
                             lineNumber: lineNum,
-                            codeContextSnippet: this.getSnippet(lines, lineNum),
+                            codeContextSnippet: this.getSnippet(getLines(), lineNum),
                             referencedTables: entities.tables,
                             referencedProcedures: entities.procedures,
                             referencedFunctions: entities.functions,
@@ -641,7 +814,7 @@ class CodeInspectorService {
                         sourceFile: filePath,
                         relativeSourceFile: relFile,
                         lineNumber: lineNum,
-                        codeContextSnippet: this.getSnippet(lines, lineNum),
+                        codeContextSnippet: this.getSnippet(getLines(), lineNum),
                         referencedTables: [],
                         referencedProcedures: [procName],
                         referencedFunctions: [],
@@ -690,6 +863,13 @@ class CodeInspectorService {
                     totalFilesScanned++;
                     const ext = path_1.default.extname(item.name).toLowerCase();
                     const baseName = item.name.toLowerCase();
+                    // Skip minified libraries, map files, and designer auto-generated files
+                    if (baseName.includes('.min.') ||
+                        baseName.endsWith('.designer.cs') ||
+                        baseName.endsWith('.designer.vb') ||
+                        baseName.endsWith('.map')) {
+                        continue;
+                    }
                     // Detect Visual Studio Solutions & Project Files
                     if (ext === '.sln') {
                         solutions.push(item.name);
