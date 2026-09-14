@@ -34,13 +34,14 @@ class CodeInspectorService {
         '.js',
     ]);
     /**
-     * Helper to extract referenced tables and procedures from SQL string
+     * Helper to extract referenced tables, procedures, and functions from SQL string
      */
     extractSqlEntities(sql) {
         const tables = new Set();
         const procedures = new Set();
+        const functions = new Set();
         if (!sql || typeof sql !== 'string')
-            return { tables: [], procedures: [] };
+            return { tables: [], procedures: [], functions: [] };
         // Tables in FROM / JOIN / INTO / UPDATE / TRUNCATE
         const tablePatterns = [
             /\b(?:FROM|JOIN)\s+([`"\[]?[\w]+[`"\]]?(?:\.[`"\[]?[\w]+[`"\]]?)*)/gi,
@@ -58,17 +59,6 @@ class CodeInspectorService {
                 }
             }
         }
-        // Stored Procedures, Functions (Scalar, Table-Valued, Package Members)
-        const procPatterns = [
-            // 1. Explicit EXEC / EXECUTE / CALL
-            /\b(?:EXEC|EXECUTE|CALL)\s+([`"\[]?[\w]+[`"\]]?(?:\.[`"\[]?[\w]+[`"\]]?)+)/gi,
-            // 2. Oracle TABLE(function_name(...)) table-valued functions
-            /\bTABLE\s*\(\s*([`"\[]?[\w]+[`"\]]?(?:\.[`"\[]?[\w]+[`"\]]?)*)\s*\(/gi,
-            // 3. Qualified schema/package functions (e.g. dbo.fn_GetSomething, schema.package.func)
-            /\b([a-zA-Z0-9_]+\.[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)?)\s*\(/g,
-            // 4. Standalone functions with naming conventions (GET_, FN_, UDF_, FUNC_, SF_, IS_, CALC_, etc.)
-            /\b((?:FN_|UDF_|FUNC_|SF_|GET_|IS_|CALC_|HITUNG_|CEK_|GENERATE_|SHOW_)[a-zA-Z0-9_]+)\s*\(/gi,
-        ];
         const standardFunctions = new Set([
             // Aggregates & Analytics
             'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'ROW_NUMBER', 'DENSE_RANK', 'RANK',
@@ -91,22 +81,64 @@ class CodeInspectorService {
             'SYS_GUID', 'NEWID', 'SCOPE_IDENTITY', 'IDENT_CURRENT', 'IIF', 'CHOOSE',
             'TABLE', 'EXISTS',
         ]);
-        for (const pat of procPatterns) {
-            let match;
-            while ((match = pat.exec(sql)) !== null) {
-                let p = match[1]?.trim();
-                if (p) {
-                    p = p.replace(/[`"\[\]]/g, '');
-                    const upper = p.toUpperCase();
-                    // If qualified with dot, check if prefix is a single-letter alias (e.g. A.COL, L.COL)
-                    if (p.includes('.')) {
-                        const parts = p.split('.');
-                        if (parts[0].length <= 1 || parts.some((part) => standardFunctions.has(part.toUpperCase()))) {
-                            continue;
-                        }
+        // 1. Explicit EXEC / EXECUTE / CALL -> Stored Procedures
+        const execRegex = /\b(?:EXEC|EXECUTE|CALL)\s+([`"\[]?[\w]+[`"\]]?(?:\.[`"\[]?[\w]+[`"\]]?)*)/gi;
+        let match;
+        while ((match = execRegex.exec(sql)) !== null) {
+            let p = match[1]?.trim();
+            if (p) {
+                p = p.replace(/[`"\[\]]/g, '');
+                const upper = p.toUpperCase();
+                if (!standardFunctions.has(upper) && !tables.has(upper) && upper.length > 2) {
+                    procedures.add(p);
+                }
+            }
+        }
+        // 2. Oracle TABLE(function_name(...)) table-valued functions
+        const tableFuncRegex = /\bTABLE\s*\(\s*([`"\[]?[\w]+[`"\]]?(?:\.[`"\[]?[\w]+[`"\]]?)*)\s*\(/gi;
+        while ((match = tableFuncRegex.exec(sql)) !== null) {
+            let f = match[1]?.trim();
+            if (f) {
+                f = f.replace(/[`"\[\]]/g, '');
+                const upper = f.toUpperCase();
+                if (!standardFunctions.has(upper) && !tables.has(upper) && upper.length > 2) {
+                    functions.add(f);
+                }
+            }
+        }
+        // 3. Standalone functions with naming conventions (GET_, FN_, UDF_, FUNC_, SF_, IS_, CALC_, etc.)
+        const namedFuncRegex = /\b((?:FN_|UDF_|FUNC_|SF_|GET_|IS_|CALC_|HITUNG_|CEK_|GENERATE_|SHOW_)[a-zA-Z0-9_]+)\s*\(/gi;
+        while ((match = namedFuncRegex.exec(sql)) !== null) {
+            let f = match[1]?.trim();
+            if (f) {
+                f = f.replace(/[`"\[\]]/g, '');
+                const upper = f.toUpperCase();
+                if (!standardFunctions.has(upper) && !tables.has(upper) && upper.length > 2) {
+                    functions.add(f);
+                }
+            }
+        }
+        // 4. Qualified schema/package functions (e.g. dbo.fn_GetSomething, schema.package.func)
+        const qualifiedRegex = /\b([a-zA-Z0-9_]+\.[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)?)\s*\(/g;
+        while ((match = qualifiedRegex.exec(sql)) !== null) {
+            let qName = match[1]?.trim();
+            if (qName) {
+                qName = qName.replace(/[`"\[\]]/g, '');
+                const upper = qName.toUpperCase();
+                const parts = qName.split('.');
+                if (parts[0].length <= 1 || parts.some((part) => standardFunctions.has(part.toUpperCase()))) {
+                    continue;
+                }
+                if (!standardFunctions.has(upper) && !tables.has(upper) && upper.length > 2) {
+                    const lastPartUpper = parts[parts.length - 1].toUpperCase();
+                    if (lastPartUpper.startsWith('SP_') ||
+                        lastPartUpper.startsWith('PR_') ||
+                        lastPartUpper.startsWith('USP_') ||
+                        lastPartUpper.startsWith('PROC_')) {
+                        procedures.add(qName);
                     }
-                    if (!standardFunctions.has(upper) && !tables.has(upper) && upper.length > 2) {
-                        procedures.add(p);
+                    else {
+                        functions.add(qName);
                     }
                 }
             }
@@ -114,6 +146,7 @@ class CodeInspectorService {
         return {
             tables: Array.from(tables),
             procedures: Array.from(procedures),
+            functions: Array.from(functions),
         };
     }
     /**
@@ -534,6 +567,7 @@ class CodeInspectorService {
                         codeContextSnippet: this.getSnippet(lines, lineNum),
                         referencedTables: entities.tables,
                         referencedProcedures: entities.procedures,
+                        referencedFunctions: entities.functions,
                         menuBreadcrumb,
                         layerType,
                         enclosingClass,
@@ -576,6 +610,7 @@ class CodeInspectorService {
                             codeContextSnippet: this.getSnippet(lines, lineNum),
                             referencedTables: entities.tables,
                             referencedProcedures: entities.procedures,
+                            referencedFunctions: entities.functions,
                             menuBreadcrumb,
                             layerType,
                             enclosingClass,
@@ -609,6 +644,7 @@ class CodeInspectorService {
                         codeContextSnippet: this.getSnippet(lines, lineNum),
                         referencedTables: [],
                         referencedProcedures: [procName],
+                        referencedFunctions: [],
                         menuBreadcrumb,
                         layerType,
                         enclosingClass,
@@ -706,25 +742,15 @@ class CodeInspectorService {
                 });
             }
         }
-        // Aggregate Stored Procedures
+        // Aggregate Stored Procedures & Database Functions
         const procMap = new Map();
         for (const q of queries) {
+            // Procedures
             for (const p of q.referencedProcedures) {
                 if (!procMap.has(p)) {
                     let pType = 'PROCEDURE';
-                    const pUpper = p.toUpperCase();
                     if (p.includes('.')) {
                         pType = 'PACKAGE_MEMBER';
-                    }
-                    else if (pUpper.startsWith('FN_') ||
-                        pUpper.startsWith('UDF_') ||
-                        pUpper.startsWith('GET_') ||
-                        pUpper.startsWith('FUNC_') ||
-                        pUpper.startsWith('SF_') ||
-                        pUpper.startsWith('IS_') ||
-                        pUpper.startsWith('CALC_') ||
-                        pUpper.startsWith('SHOW_')) {
-                        pType = 'FUNCTION';
                     }
                     procMap.set(p, {
                         name: p,
@@ -734,6 +760,32 @@ class CodeInspectorService {
                     });
                 }
                 const item = procMap.get(p);
+                item.calledCount++;
+                item.occurrences.push({
+                    file: q.sourceFile,
+                    relativeFile: q.relativeSourceFile,
+                    lineNumber: q.lineNumber,
+                    snippet: q.codeContextSnippet,
+                });
+            }
+            // Functions
+            for (const f of (q.referencedFunctions || [])) {
+                if (!procMap.has(f)) {
+                    let fType = 'FUNCTION';
+                    if (f.includes('.')) {
+                        fType = 'PACKAGE_MEMBER';
+                    }
+                    else if (f.toUpperCase().includes('TABLE(')) {
+                        fType = 'TABLE_FUNCTION';
+                    }
+                    procMap.set(f, {
+                        name: f,
+                        type: fType,
+                        calledCount: 0,
+                        occurrences: [],
+                    });
+                }
+                const item = procMap.get(f);
                 item.calledCount++;
                 item.occurrences.push({
                     file: q.sourceFile,
