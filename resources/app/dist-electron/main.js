@@ -20,6 +20,7 @@ const txtBundleService_1 = require("./services/txtBundleService");
 const multiDbService_1 = require("./services/multiDbService");
 const ssisService_1 = require("./services/ssisService");
 const codeInspectorService_1 = require("./services/codeInspectorService");
+const queryBeautyService_1 = require("./services/queryBeautyService");
 const sshTunnelService_1 = require("./services/sshTunnelService");
 function writeLog(msg) {
     const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -1052,4 +1053,17 @@ electron_1.ipcMain.handle('ssis:cancel-job', async (_event, jobId) => {
 // ==================== CODEBASE & APP DB INSPECTOR HANDLERS ====================
 electron_1.ipcMain.handle('code-inspector:scan', async (_event, folderPath) => {
     return codeInspectorService_1.codeInspectorService.scanFolder(folderPath);
+});
+// ==================== QUERY BEAUTY HANDLERS ====================
+electron_1.ipcMain.handle('query-beauty:read-column', async (_event, filePath, sheetName, columnName) => {
+    return queryBeautyService_1.queryBeautyService.readColumnQueries(filePath, sheetName, columnName);
+});
+electron_1.ipcMain.handle('query-beauty:save-excel', async (_event, sourcePath, targetPath, sheetName, columnName, beautifiedMap) => {
+    return queryBeautyService_1.queryBeautyService.saveBeautifiedExcel(sourcePath, targetPath, sheetName, columnName, beautifiedMap);
+});
+electron_1.ipcMain.handle('query-beauty:save-sql', async (_event, targetPath, queryRows, title) => {
+    return queryBeautyService_1.queryBeautyService.exportQueriesToSql(targetPath, queryRows, title);
+});
+electron_1.ipcMain.handle('query-beauty:beautify-text', async (_event, rawSql) => {
+    return (0, queryBeautyService_1.beautifyOracleQuery)(rawSql);
 });
