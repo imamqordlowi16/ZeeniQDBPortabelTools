@@ -597,21 +597,54 @@ class CodeInspectorService {
      * e.g. "jenisData.AsDbLiteral()" -> "jenisData"
      * e.g. "posisi.ToString(\"dd/MM/yyyy\").AsDbLiteral()" -> "posisi"
      * e.g. "model.JenisData.AsDbLiteral()" -> "JenisData"
+     * e.g. "idkategori.AsORCLString()" -> "idkategori"
+     * e.g. "Satuan.AsORCLString()" -> "Satuan"
      */
     cleanArgumentVariable(rawArg) {
         if (!rawArg)
             return '';
         let clean = rawArg.trim();
+        // 1. Remove comments /*...*/ and //...
         clean = clean.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '').trim();
-        clean = clean.replace(/\.(?:AsDbLiteral|ToString|Trim|ToUpper|ToLower|ToShortDateString)\s*\([^)]*\)/gi, '');
-        clean = clean.replace(/\.(?:AsDbLiteral|Trim|ToUpper|ToLower)\b/gi, '');
-        clean = clean.replace(/^\s*\([a-zA-Z0-9_<>?]+\)\s*/, '');
+        // 2. Remove cast prefixes, e.g. (string), (int?), (decimal)
+        clean = clean.replace(/^\s*\([a-zA-Z0-9_<>?,\s]+\)\s*/, '');
         clean = clean.replace(/\s+as\s+[a-zA-Z0-9_<>?]+/i, '');
+        // 3. Iteratively strip trailing method calls, e.g. .AsORCLString(), .ToString("..."), .Trim(), .ToUpper(), etc.
+        let prev = '';
+        while (prev !== clean) {
+            prev = clean;
+            clean = clean.replace(/\.[a-zA-Z0-9_]+\s*\([^)]*\)\s*$/g, '').trim();
+        }
+        // 4. Strip trailing properties like .Value, .SelectedValue, .SelectedItem, .Text, .Length, etc.
+        clean = clean.replace(/\.(?:Value|SelectedValue|SelectedItem|Text|Length|Date|ToString|Trim|ToUpper|ToLower)\s*$/gi, '').trim();
+        // 5. If it's a property access like model.JenisData or o.Prop
         const dotParts = clean.split('.');
         if (dotParts.length > 1) {
             clean = dotParts[dotParts.length - 1];
         }
         return clean.replace(/[^a-zA-Z0-9_]/g, '').trim();
+    }
+    /**
+     * Build interpolated SQL query by replacing placeholders like {0}, {1}
+     * with clean variable names or mapped columns
+     */
+    buildInterpolatedSql(sql, parameterMappings) {
+        if (!sql || !parameterMappings || parameterMappings.length === 0) {
+            return sql;
+        }
+        let result = sql;
+        for (const pm of parameterMappings) {
+            let rep = pm.cleanVariable;
+            if (!rep || rep.trim().length === 0) {
+                rep = pm.column || pm.rawArgument;
+            }
+            if (rep) {
+                rep = rep.replace(/^@?["']|["']$/g, '').trim();
+                const regex = new RegExp(`\\{${pm.index}\\}`, 'g');
+                result = result.replace(regex, rep);
+            }
+        }
+        return result;
     }
     /**
      * Parse comma-separated arguments from string.Format(..., arg1, arg2)
@@ -960,10 +993,10 @@ class CodeInspectorService {
                     else if (keyword.startsWith('MERGE'))
                         qType = 'MERGE';
                     const { processStage, processStageLabel, processFlowSummary } = this.inferProcessFlow(enclosingMethod, qType, sql, menuBreadcrumb);
-                    const targetIdentifier = entities.tables[0] || entities.procedures[0] || entities.functions[0] || path_1.default.basename(relFile);
                     // Extract parameter mappings if string.Format is used
                     const formatArgs = this.extractFormatArguments(content, match.index, fullMatch.length);
                     let parameterMappings;
+                    let interpolatedSql;
                     if (formatArgs.length > 0) {
                         const colMap = this.parseSqlColumnAndPlaceholderMap(sql);
                         parameterMappings = formatArgs.map((rawArg, idx) => {
@@ -977,12 +1010,32 @@ class CodeInspectorService {
                                 cleanVariable: cleanVar,
                             };
                         });
+                        interpolatedSql = this.buildInterpolatedSql(sql, parameterMappings);
+                        // Enhance entities with functions/procedures from interpolatedSql (e.g. TABLE(idFuction(...)))
+                        const interpolatedEntities = this.extractSqlEntities(interpolatedSql);
+                        for (const f of interpolatedEntities.functions) {
+                            if (!entities.functions.includes(f)) {
+                                entities.functions.push(f);
+                            }
+                        }
+                        for (const p of interpolatedEntities.procedures) {
+                            if (!entities.procedures.includes(p)) {
+                                entities.procedures.push(p);
+                            }
+                        }
+                        for (const t of interpolatedEntities.tables) {
+                            if (!entities.tables.includes(t)) {
+                                entities.tables.push(t);
+                            }
+                        }
                     }
+                    const targetIdentifier = entities.tables[0] || entities.procedures[0] || entities.functions[0] || path_1.default.basename(relFile);
                     queries.push({
                         id: `sql-${Buffer.from(relFile + lineNum + counter++).toString('hex').substring(0, 10)}`,
                         name: `${qType} (${targetIdentifier})`,
                         type: qType,
                         sql,
+                        interpolatedSql,
                         sourceFile: filePath,
                         relativeSourceFile: relFile,
                         lineNumber: lineNum,
@@ -1030,10 +1083,10 @@ class CodeInspectorService {
                         else if (keyword.startsWith('MERGE'))
                             qType = 'MERGE';
                         const { processStage, processStageLabel, processFlowSummary } = this.inferProcessFlow(enclosingMethod, qType, sql, menuBreadcrumb);
-                        const targetIdentifier = entities.tables[0] || entities.procedures[0] || entities.functions[0] || path_1.default.basename(relFile);
                         // Extract parameter mappings if string.Format is used
                         const formatArgs = this.extractFormatArguments(content, match.index, match[0].length);
                         let parameterMappings;
+                        let interpolatedSql;
                         if (formatArgs.length > 0) {
                             const colMap = this.parseSqlColumnAndPlaceholderMap(sql);
                             parameterMappings = formatArgs.map((rawArg, idx) => {
@@ -1047,12 +1100,31 @@ class CodeInspectorService {
                                     cleanVariable: cleanVar,
                                 };
                             });
+                            interpolatedSql = this.buildInterpolatedSql(sql, parameterMappings);
+                            const interpolatedEntities = this.extractSqlEntities(interpolatedSql);
+                            for (const f of interpolatedEntities.functions) {
+                                if (!entities.functions.includes(f)) {
+                                    entities.functions.push(f);
+                                }
+                            }
+                            for (const p of interpolatedEntities.procedures) {
+                                if (!entities.procedures.includes(p)) {
+                                    entities.procedures.push(p);
+                                }
+                            }
+                            for (const t of interpolatedEntities.tables) {
+                                if (!entities.tables.includes(t)) {
+                                    entities.tables.push(t);
+                                }
+                            }
                         }
+                        const targetIdentifier = entities.tables[0] || entities.procedures[0] || entities.functions[0] || path_1.default.basename(relFile);
                         queries.push({
                             id: `sql-${Buffer.from(relFile + lineNum + counter++).toString('hex').substring(0, 10)}`,
                             name: `${qType} (${targetIdentifier})`,
                             type: qType,
                             sql,
+                            interpolatedSql,
                             sourceFile: filePath,
                             relativeSourceFile: relFile,
                             lineNumber: lineNum,
