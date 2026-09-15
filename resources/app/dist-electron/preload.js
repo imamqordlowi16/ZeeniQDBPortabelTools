@@ -34,7 +34,8 @@ const electronAPI = {
     getTablespaceUsage: (config) => electron_1.ipcRenderer.invoke('oracle:get-tablespace-usage', config),
     getTopSql: (config) => electron_1.ipcRenderer.invoke('oracle:get-top-sql', config),
     // TXT Bundle & Bloomberg Data License Importer
-    analyzeTxtBundle: (sourcePathOrFiles) => electron_1.ipcRenderer.invoke('txt-bundle:analyze', sourcePathOrFiles),
+    analyzeTxtBundle: (sourcePathOrFiles, selectedSheet) => electron_1.ipcRenderer.invoke('txt-bundle:analyze', sourcePathOrFiles, selectedSheet),
+    exportTxtBundleToExcel: (sourcePathOrFiles, columns, targetFilePath, selectedSheet, maxRows) => electron_1.ipcRenderer.invoke('txt-bundle:export-excel', sourcePathOrFiles, columns, targetFilePath, selectedSheet, maxRows),
     importTxtBundle: (config, options) => electron_1.ipcRenderer.invoke('txt-bundle:import', config, options),
     onTxtBundleProgress: (callback) => {
         const listener = (_, progress) => callback(progress);

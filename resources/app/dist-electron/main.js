@@ -619,11 +619,15 @@ electron_1.ipcMain.handle('dialog:select-txt-files', async (_, title) => {
     if (!mainWindow)
         return [];
     const res = await electron_1.dialog.showOpenDialog(mainWindow, {
-        title: title || 'Pilih File TXT / Data License',
+        title: title || 'Pilih File TXT / CSV / Excel',
         properties: ['openFile', 'multiSelections'],
         filters: [
-            { name: 'Data Files (*.txt, *.reg, *.csv, *.tsv, *.dat)', extensions: ['txt', 'reg', 'csv', 'tsv', 'dat'] },
-            { name: 'Text Files (*.txt)', extensions: ['txt'] },
+            {
+                name: 'Data Files (*.txt, *.csv, *.xlsx, *.xls, *.reg, *.tsv, *.dat)',
+                extensions: ['txt', 'csv', 'xlsx', 'xls', 'reg', 'tsv', 'dat'],
+            },
+            { name: 'Excel Files (*.xlsx, *.xls)', extensions: ['xlsx', 'xls'] },
+            { name: 'Text & CSV Files (*.txt, *.csv)', extensions: ['txt', 'csv'] },
             { name: 'All Files (*.*)', extensions: ['*'] },
         ],
     });
@@ -633,8 +637,11 @@ electron_1.ipcMain.handle('dialog:select-txt-files', async (_, title) => {
     return [];
 });
 // ==================== TXT BUNDLE IMPORTER HANDLERS ====================
-electron_1.ipcMain.handle('txt-bundle:analyze', async (_, sourcePathOrFiles) => {
-    return await txtBundleService.analyzeBundle(sourcePathOrFiles);
+electron_1.ipcMain.handle('txt-bundle:analyze', async (_, sourcePathOrFiles, selectedSheet) => {
+    return await txtBundleService.analyzeBundle(sourcePathOrFiles, selectedSheet);
+});
+electron_1.ipcMain.handle('txt-bundle:export-excel', async (_, sourcePathOrFiles, columns, targetFilePath, selectedSheet, maxRows) => {
+    return await txtBundleService.exportBundleToExcel(sourcePathOrFiles, columns, targetFilePath, selectedSheet, maxRows);
 });
 electron_1.ipcMain.handle('txt-bundle:import', async (_, config, options) => {
     return await txtBundleService.executeBundleImport(config, options, (progress) => {

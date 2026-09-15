@@ -162,6 +162,34 @@ class CodeInspectorService {
         };
     }
     /**
+     * Helper to extract JOIN table relationships and conditions from SQL string
+     */
+    extractSqlJoins(sql) {
+        const joins = [];
+        if (!sql || typeof sql !== 'string')
+            return joins;
+        const joinRegex = /\b(LEFT\s+(?:OUTER\s+)?JOIN|RIGHT\s+(?:OUTER\s+)?JOIN|INNER\s+JOIN|FULL\s+(?:OUTER\s+)?JOIN|CROSS\s+JOIN|JOIN)\s+([`"\[]?[\w]+[`"\]]?(?:\.[`"\[]?[\w]+[`"\]]?)*)(?:\s+AS\s+|\s+)?([`"\[]?[\w]+[`"\]]?)?(?:\s+ON\s+([\s\S]*?))?(?=\b(?:LEFT|RIGHT|INNER|FULL|CROSS|JOIN|WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|UNION|SELECT|INSERT|UPDATE|DELETE|\)|;|$))/gi;
+        let m;
+        while ((m = joinRegex.exec(sql)) !== null) {
+            const joinType = m[1].replace(/\s+/g, ' ').toUpperCase();
+            let table = m[2] ? m[2].trim().replace(/[`"\[\]]/g, '').toUpperCase() : '';
+            let alias = m[3] ? m[3].trim().replace(/[`"\[\]]/g, '') : '';
+            let condition = m[4] ? m[4].trim().replace(/\s+/g, ' ') : '';
+            if (alias && ['ON', 'WHERE', 'AND', 'OR', 'LEFT', 'RIGHT', 'INNER', 'JOIN'].includes(alias.toUpperCase())) {
+                alias = '';
+            }
+            if (table && table.length > 1 && !['SELECT', '(', ')'].includes(table)) {
+                joins.push({
+                    joinType,
+                    table,
+                    alias: alias || undefined,
+                    condition: condition || undefined,
+                });
+            }
+        }
+        return joins;
+    }
+    /**
      * Parse connection string into structured fields
      */
     parseConnectionString(rawConn, sourceFile, relFile, name, sourceType) {
@@ -1188,6 +1216,153 @@ class CodeInspectorService {
         return queries;
     }
     /**
+     * Scan UI Page (.aspx, .ascx) for GridViews, Columns, and code-behind data bindings
+     */
+    scanUiPageFile(filePath, rootPath) {
+        try {
+            const content = fs_1.default.readFileSync(filePath, 'utf8');
+            const ext = path_1.default.extname(filePath).toLowerCase();
+            if (ext !== '.aspx' && ext !== '.ascx')
+                return null;
+            const pageName = path_1.default.basename(filePath);
+            const pagePath = path_1.default.relative(rootPath, filePath).replace(/\\/g, '/');
+            const pathParts = pagePath.split('/');
+            const moduleName = pathParts.length > 2 ? pathParts[pathParts.length - 2] : pathParts[0] || 'App';
+            // Page Title
+            let pageTitle = '';
+            const titleAttrMatch = content.match(/\bTitle\s*=\s*["']([^"']+)["']/i);
+            if (titleAttrMatch) {
+                pageTitle = titleAttrMatch[1].trim();
+            }
+            else {
+                const hMatch = content.match(/<h[1-4][^>]*>([^<]+)<\/h[1-4]>/i);
+                if (hMatch)
+                    pageTitle = hMatch[1].trim();
+            }
+            // Read Code-Behind if exists
+            const csPath = `${filePath}.cs`;
+            let csContent = '';
+            let formId = '';
+            let codeBehindPath = undefined;
+            let relativeCodeBehindPath = undefined;
+            if (fs_1.default.existsSync(csPath)) {
+                csContent = fs_1.default.readFileSync(csPath, 'utf8');
+                codeBehindPath = csPath;
+                relativeCodeBehindPath = path_1.default.relative(rootPath, csPath).replace(/\\/g, '/');
+                // Form ID e.g. IdForm = "DSSK-888"
+                const idFormMatch = csContent.match(/\bIdForm\s*=\s*["']([^"']+)["']/i);
+                if (idFormMatch) {
+                    formId = idFormMatch[1].trim();
+                }
+            }
+            const gridViews = [];
+            // Regex for Grids (RadGrid, GridView, DataGrid, ASPxGridView)
+            const gridRegex = /<(telerik:RadGrid|asp:GridView|asp:DataGrid|dx:ASPxGridView)\s+([^>]+)>([\s\S]*?)<\/\1>/gi;
+            let m;
+            while ((m = gridRegex.exec(content)) !== null) {
+                const gridType = m[1];
+                const attrs = m[2];
+                const body = m[3];
+                const idMatch = attrs.match(/\bID\s*=\s*["']([^"']+)["']/i);
+                const gridId = idMatch ? idMatch[1] : `Grid_${gridViews.length + 1}`;
+                const charIndex = m.index;
+                const lineNum = content.slice(0, charIndex).split('\n').length;
+                const eventMatch = attrs.match(/\b(OnNeedDataSource|OnRowDataBound|OnItemDataBound)\s*=\s*["']([^"']+)["']/i);
+                const dataSourceEvent = eventMatch ? eventMatch[2] : undefined;
+                let dataSourceVar = undefined;
+                let dataLoaderClassOrMethod = undefined;
+                if (csContent) {
+                    const dsRegex = new RegExp(`\\b${gridId}\\.DataSource\\s*=\\s*([^;\\r\\n]+);`, 'i');
+                    const dsMatch = csContent.match(dsRegex);
+                    if (dsMatch) {
+                        dataSourceVar = dsMatch[1].trim();
+                        const assignRegex = new RegExp(`\\b${dataSourceVar}\\s*=\\s*([^;\\r\\n]+);`, 'g');
+                        let am;
+                        while ((am = assignRegex.exec(csContent)) !== null) {
+                            const val = am[1].trim();
+                            if (val.includes('(') && !val.includes('ViewState')) {
+                                dataLoaderClassOrMethod = val;
+                            }
+                        }
+                    }
+                }
+                // Parse Columns
+                const columns = [];
+                const colRegex = /<(?:telerik|asp|dx):([a-zA-Z0-9_]*(?:Column|Field))\s+([^>]+?)(?:\/>|>([\s\S]*?)<\/(?:telerik|asp|dx):[a-zA-Z0-9_]*(?:Column|Field)>)/gi;
+                let cm;
+                while ((cm = colRegex.exec(body)) !== null) {
+                    const colType = cm[1];
+                    const cAttrs = cm[2];
+                    const cBody = cm[3] || '';
+                    const dfMatch = cAttrs.match(/\bDataField\s*=\s*["']([^"']+)["']/i);
+                    const htMatch = cAttrs.match(/\bHeaderText\s*=\s*["']([^"']+)["']/i);
+                    const unMatch = cAttrs.match(/\bUniqueName\s*=\s*["']([^"']+)["']/i);
+                    const seMatch = cAttrs.match(/\bSortExpression\s*=\s*["']([^"']+)["']/i);
+                    const visMatch = cAttrs.match(/\bVisible\s*=\s*["']([^"']+)["']/i);
+                    const filtMatch = cAttrs.match(/\bAllowFiltering\s*=\s*["']([^"']+)["']/i);
+                    const sortMatch = cAttrs.match(/\bAllowSorting\s*=\s*["']([^"']+)["']/i);
+                    let evalField = undefined;
+                    if (!dfMatch && cBody) {
+                        const evalMatch = cBody.match(/(?:Eval|Bind)\s*\(\s*["']([^"']+)["']/i);
+                        if (evalMatch)
+                            evalField = evalMatch[1].trim();
+                    }
+                    const dataField = dfMatch ? dfMatch[1].trim() : evalField || unMatch?.[1]?.trim() || '';
+                    const headerText = htMatch ? htMatch[1].trim() : dataField || unMatch?.[1]?.trim() || `Kolom ${columns.length + 1}`;
+                    columns.push({
+                        headerText,
+                        dataField,
+                        uniqueName: unMatch ? unMatch[1].trim() : undefined,
+                        columnType: colType,
+                        sortExpression: seMatch ? seMatch[1].trim() : dataField || undefined,
+                        visible: visMatch ? visMatch[1].toLowerCase() !== 'false' : true,
+                        allowFiltering: filtMatch ? filtMatch[1].toLowerCase() !== 'false' : true,
+                        allowSorting: sortMatch ? sortMatch[1].toLowerCase() !== 'false' : true,
+                        matchedDbColumn: dataField ? dataField.toUpperCase() : undefined,
+                    });
+                }
+                gridViews.push({
+                    id: gridId,
+                    gridType,
+                    lineNumber: lineNum,
+                    dataSourceEvent,
+                    onNeedDataSource: dataSourceEvent?.includes('NeedData') ? dataSourceEvent : undefined,
+                    onRowDataBound: dataSourceEvent?.includes('RowData') ? dataSourceEvent : undefined,
+                    dataSourceVar: dataLoaderClassOrMethod
+                        ? `${dataSourceVar} (${dataLoaderClassOrMethod})`
+                        : dataSourceVar,
+                    dataSourceVariable: dataSourceVar,
+                    dataLoaderCall: dataLoaderClassOrMethod,
+                    referencedTables: [],
+                    columns,
+                });
+            }
+            if (gridViews.length === 0)
+                return null;
+            return {
+                id: `page_${crypto_1.default.randomUUID().slice(0, 8)}`,
+                pageName,
+                fileName: pageName,
+                pagePath,
+                relativeFilePath: pagePath,
+                fullPath: filePath,
+                filePath,
+                codeBehindPath,
+                relativeCodeBehindPath,
+                codeBehindFile: relativeCodeBehindPath || codeBehindPath,
+                moduleName,
+                module: moduleName,
+                pageTitle: pageTitle || pageName,
+                formId: formId || undefined,
+                idForm: formId || undefined,
+                gridViews,
+            };
+        }
+        catch (e) {
+            return null;
+        }
+    }
+    /**
      * Main scan function for a folder / codebase
      */
     scanFolder(folderPath) {
@@ -1200,6 +1375,7 @@ class CodeInspectorService {
         const connections = [];
         const queries = [];
         const models = [];
+        const uiPages = [];
         let totalFilesScanned = 0;
         const walk = (currentDir) => {
             const items = fs_1.default.readdirSync(currentDir, { withFileTypes: true });
@@ -1245,6 +1421,13 @@ class CodeInspectorService {
                         const fileModels = this.scanModelFile(full, rel);
                         if (fileModels.length > 0) {
                             models.push(...fileModels);
+                        }
+                    }
+                    // Parse UI Pages & GridViews (ASPX, ASCX)
+                    if (ext === '.aspx' || ext === '.ascx') {
+                        const page = this.scanUiPageFile(full, folderPath);
+                        if (page) {
+                            uiPages.push(page);
                         }
                     }
                     // Parse Embedded SQL & Stored Procedures from Source Code
@@ -1393,6 +1576,41 @@ class CodeInspectorService {
         const tables = Array.from(tableMap.values()).sort((a, b) => b.referencedCount - a.referencedCount);
         const procedures = Array.from(procMap.values()).sort((a, b) => b.calledCount - a.calledCount);
         const sortedModels = models.sort((a, b) => b.referencedQueriesCount - a.referencedQueriesCount || a.name.localeCompare(b.name));
+        // Cross-link UI GridViews with queries and database tables
+        for (const page of uiPages) {
+            const pageQueries = queries.filter((q) => q.sourceFile === page.fullPath ||
+                (page.codeBehindPath && q.sourceFile === page.codeBehindPath));
+            for (const grid of page.gridViews) {
+                const gridTableSet = new Set();
+                const gridQueryIds = new Set();
+                // 1. Direct page queries
+                for (const q of pageQueries) {
+                    gridQueryIds.add(q.id);
+                    q.referencedTables.forEach((t) => gridTableSet.add(t));
+                }
+                // 2. If grid.dataSourceVar references a class or method (e.g. classAuditee.GetAuditeeTable)
+                if (grid.dataSourceVar) {
+                    const words = grid.dataSourceVar.match(/\b([A-Za-z0-9_]{3,})\b/g) || [];
+                    for (const word of words) {
+                        const wLower = word.toLowerCase();
+                        if (['data', 'table', 'viewstate', 'string', 'empty', 'new', 'null', 'void', 'get', 'set'].includes(wLower)) {
+                            continue;
+                        }
+                        const relatedQueries = queries.filter((q) => q.sourceFile.includes(word) ||
+                            q.enclosingClass === word ||
+                            q.sql.includes(word));
+                        for (const rq of relatedQueries) {
+                            gridQueryIds.add(rq.id);
+                            rq.referencedTables.forEach((t) => gridTableSet.add(t));
+                        }
+                    }
+                }
+                grid.referencedTables = Array.from(gridTableSet);
+                grid.referencedQueryIds = Array.from(gridQueryIds);
+                grid.referencedQueriesCount = gridQueryIds.size;
+            }
+        }
+        const sortedUiPages = uiPages.sort((a, b) => a.pagePath.localeCompare(b.pagePath));
         const stats = {
             totalFilesScanned,
             totalConnectionsFound: connections.length,
@@ -1400,6 +1618,8 @@ class CodeInspectorService {
             totalTablesFound: tables.length,
             totalProceduresFound: procedures.length,
             totalModelsFound: sortedModels.length,
+            totalUiPagesFound: sortedUiPages.length,
+            totalGridViewsFound: sortedUiPages.reduce((sum, p) => sum + p.gridViews.length, 0),
             durationMs: Date.now() - startTime,
         };
         return {
@@ -1412,6 +1632,7 @@ class CodeInspectorService {
             tables,
             procedures,
             models: sortedModels,
+            uiPages: sortedUiPages,
         };
     }
 }

@@ -1,4 +1,37 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -7,6 +40,7 @@ exports.TxtBundleService = void 0;
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const crypto_1 = __importDefault(require("crypto"));
+const XLSX = __importStar(require("xlsx"));
 class TxtBundleService {
     oracleService;
     constructor(oracleService) {
@@ -15,7 +49,7 @@ class TxtBundleService {
     /**
      * Scan folder or list of files and inspect schema structure
      */
-    async analyzeBundle(sourcePathOrFiles) {
+    async analyzeBundle(sourcePathOrFiles, selectedSheet) {
         try {
             let filePaths = [];
             let sourceDir = '';
@@ -28,7 +62,7 @@ class TxtBundleService {
                 if (stat.isDirectory()) {
                     const files = fs_1.default.readdirSync(sourceDir);
                     filePaths = files
-                        .filter((f) => /\.(txt|reg|csv|tsv|dat)$/i.test(f))
+                        .filter((f) => /\.(txt|reg|csv|tsv|dat|xlsx|xls)$/i.test(f))
                         .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
                         .map((f) => path_1.default.join(sourceDir, f));
                 }
@@ -44,10 +78,14 @@ class TxtBundleService {
                 }
             }
             if (filePaths.length === 0) {
-                throw new Error('Tidak ditemukan file data TXT/REG/CSV pada jalur yang dipilih.');
+                throw new Error('Tidak ditemukan file data TXT/REG/CSV/Excel pada jalur yang dipilih.');
             }
             // Check first file to detect format
             const sampleFile = filePaths[0];
+            const isExcel = /\.(xlsx|xls)$/i.test(sampleFile);
+            if (isExcel) {
+                return this.analyzeExcelBundle(sourceDir, filePaths, selectedSheet);
+            }
             const sampleContent = fs_1.default.readFileSync(sampleFile, 'utf8');
             const lines = sampleContent.split(/\r?\n/).map((l) => l.trim());
             const isBloomberg = lines.some((l) => l === 'START-OF-FIELDS' || l === 'START-OF-DATA') ||
@@ -72,6 +110,219 @@ class TxtBundleService {
                 error: err.message || String(err),
             };
         }
+    }
+    /**
+     * Analyze Excel workbook (.xlsx, .xls)
+     */
+    analyzeExcelBundle(sourceDir, filePaths, selectedSheet) {
+        const sampleFile = filePaths[0];
+        const workbook = XLSX.readFile(sampleFile, { cellDates: true, dense: true });
+        const sheetNames = workbook.SheetNames || [];
+        if (sheetNames.length === 0) {
+            throw new Error(`File Excel tidak memiliki worksheet: ${path_1.default.basename(sampleFile)}`);
+        }
+        const activeSheetName = selectedSheet && sheetNames.includes(selectedSheet) ? selectedSheet : sheetNames[0];
+        const worksheet = workbook.Sheets[activeSheetName];
+        if (!worksheet) {
+            throw new Error(`Sheet ${activeSheetName} tidak ditemukan dalam file Excel`);
+        }
+        // Convert sheet to JSON array of arrays (header: 1)
+        const rawData = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: null, blankrows: false });
+        if (!rawData || rawData.length === 0) {
+            throw new Error(`Sheet "${activeSheetName}" kosong (tidak ada data).`);
+        }
+        // Identify header row (first non-empty row)
+        let headerRowIdx = 0;
+        while (headerRowIdx < rawData.length && (!rawData[headerRowIdx] || rawData[headerRowIdx].length === 0)) {
+            headerRowIdx++;
+        }
+        const rawHeaders = (rawData[headerRowIdx] || []).map((h, i) => {
+            const str = String(h ?? '').trim();
+            return str || `KOLOM_${i + 1}`;
+        });
+        const dataRows = rawData.slice(headerRowIdx + 1);
+        const sampleRows = dataRows.slice(0, 100);
+        // Build columns & infer types
+        const columns = [];
+        // 1. Default ID column
+        columns.push({
+            name: 'ID',
+            type: 'VARCHAR2(36)',
+            isNullable: false,
+            sampleValue: 'c03e83fa-589d-4e92-b413-5a0455ca35e1',
+            sourceType: 'guid',
+            sourceKey: 'ID',
+            isMetadata: true,
+        });
+        // 2. Map each Excel column
+        rawHeaders.forEach((header, idx) => {
+            let oracleColName = header
+                .toUpperCase()
+                .replace(/[^A-Z0-9_]/g, '_')
+                .replace(/__+/g, '_')
+                .slice(0, 30);
+            if (!oracleColName || /^[0-9]/.test(oracleColName)) {
+                oracleColName = `COL_${oracleColName}`;
+            }
+            // Ensure column name uniqueness
+            let uniqueColName = oracleColName;
+            let counter = 1;
+            while (columns.some((c) => c.name === uniqueColName)) {
+                uniqueColName = `${oracleColName.slice(0, 26)}_${counter++}`;
+            }
+            // Infer type from sample rows
+            let inferredType = 'VARCHAR2(255)';
+            let maxLen = 0;
+            let isAllNumeric = true;
+            let hasDecimal = false;
+            let isAllDate = true;
+            let nonNullCount = 0;
+            for (const row of sampleRows) {
+                const val = row[idx];
+                if (val !== null && val !== undefined && String(val).trim() !== '') {
+                    nonNullCount++;
+                    const strVal = String(val).trim();
+                    maxLen = Math.max(maxLen, strVal.length);
+                    if (val instanceof Date) {
+                        isAllNumeric = false;
+                    }
+                    else if (typeof val === 'number') {
+                        isAllDate = false;
+                        if (!Number.isInteger(val)) {
+                            hasDecimal = true;
+                        }
+                    }
+                    else {
+                        isAllDate = isAllDate && !isNaN(Date.parse(strVal)) && (strVal.includes('-') || strVal.includes('/'));
+                        isAllNumeric = isAllNumeric && !isNaN(Number(strVal));
+                        if (isAllNumeric && strVal.includes('.')) {
+                            hasDecimal = true;
+                        }
+                    }
+                }
+            }
+            if (nonNullCount > 0) {
+                if (isAllDate) {
+                    inferredType = 'DATE';
+                }
+                else if (isAllNumeric) {
+                    inferredType = hasDecimal ? 'NUMBER(18,4)' : 'NUMBER(18)';
+                }
+                else if (maxLen > 2000) {
+                    inferredType = 'CLOB';
+                }
+                else if (maxLen > 255) {
+                    inferredType = `VARCHAR2(${Math.min(4000, Math.ceil(maxLen * 1.5))})`;
+                }
+                else {
+                    inferredType = `VARCHAR2(${Math.max(50, Math.min(255, Math.ceil(maxLen * 1.5)))})`;
+                }
+            }
+            const firstSample = sampleRows.find((r) => r[idx] !== null && r[idx] !== undefined)?.[idx];
+            columns.push({
+                name: uniqueColName,
+                type: inferredType,
+                isNullable: true,
+                sampleValue: firstSample !== undefined ? (firstSample instanceof Date ? firstSample.toISOString().slice(0, 10) : String(firstSample)) : '-',
+                sourceType: 'field',
+                sourceIndex: idx,
+                sourceKey: header,
+            });
+        });
+        // 3. Metadata columns
+        columns.push({
+            name: 'FILE_NAME',
+            type: 'VARCHAR2(150)',
+            isNullable: true,
+            sampleValue: path_1.default.basename(sampleFile),
+            sourceType: 'metadata',
+            sourceKey: 'FILE_NAME',
+            isMetadata: true,
+        });
+        columns.push({
+            name: 'LOAD_TIMESTAMP',
+            type: 'DATE',
+            isNullable: true,
+            sampleValue: 'SYSDATE',
+            sourceType: 'metadata',
+            sourceKey: 'LOAD_TIMESTAMP',
+            isMetadata: true,
+        });
+        // Convert sampleRows to previewRows (array of objects)
+        const previewRows = sampleRows.map((row) => {
+            const obj = {};
+            rawHeaders.forEach((h, idx) => {
+                const val = row[idx];
+                if (val instanceof Date) {
+                    obj[h] = val.toISOString().slice(0, 10);
+                }
+                else {
+                    obj[h] = val !== null && val !== undefined ? String(val) : '';
+                }
+            });
+            obj['FILE_NAME'] = path_1.default.basename(sampleFile);
+            obj['LOAD_TIMESTAMP'] = new Date().toISOString();
+            return obj;
+        });
+        // Build sample tokens for Excel file
+        const sampleTokens = rawHeaders.map((h, idx) => {
+            const upperName = h.toUpperCase().replace(/[^A-Z0-9_]/g, '_').slice(0, 30);
+            const matchedCol = columns.find((c) => c.name === upperName);
+            return {
+                index: idx,
+                label: `Kolom ${idx + 1} (${h})`,
+                sampleValue: String(previewRows[0]?.[h] ?? ''),
+                suggestedName: upperName,
+                suggestedType: matchedCol?.type || 'VARCHAR2(255)',
+                sourceType: 'field',
+                sourceKey: h,
+            };
+        });
+        sampleTokens.push({
+            index: -2,
+            label: 'Metadata: FILE_NAME (Nama File)',
+            sampleValue: path_1.default.basename(sampleFile),
+            suggestedName: 'FILE_NAME',
+            suggestedType: 'VARCHAR2(150)',
+            sourceType: 'metadata',
+            sourceKey: 'FILE_NAME',
+        });
+        sampleTokens.push({
+            index: -3,
+            label: 'Metadata: LOAD_TIMESTAMP (SYSDATE)',
+            sampleValue: 'SYSDATE',
+            suggestedName: 'LOAD_TIMESTAMP',
+            suggestedType: 'DATE',
+            sourceType: 'metadata',
+            sourceKey: 'LOAD_TIMESTAMP',
+        });
+        // Determine suggested table name
+        let base = path_1.default
+            .basename(sampleFile)
+            .replace(/\.(xlsx|xls)$/i, '')
+            .toUpperCase()
+            .replace(/[^A-Z0-9_]/g, '_');
+        if (activeSheetName && activeSheetName.toLowerCase() !== 'sheet1') {
+            base = `${base}_${activeSheetName.toUpperCase().replace(/[^A-Z0-9_]/g, '_')}`;
+        }
+        if (!base.startsWith('DATA_')) {
+            base = `DATA_${base}`;
+        }
+        const suggestedTableName = base.slice(0, 30);
+        const totalEstimatedRows = dataRows.length * filePaths.length;
+        return {
+            sourcePath: sourceDir,
+            totalFiles: filePaths.length,
+            sampleFiles: filePaths.slice(0, 5).map((f) => path_1.default.basename(f)),
+            fileType: 'excel',
+            suggestedTableName,
+            columns,
+            previewRows,
+            totalEstimatedRows,
+            sheetNames,
+            selectedSheet: activeSheetName,
+            sampleTokens,
+        };
     }
     /**
      * Analyze Bloomberg Data License bundle (e.g. DSSK_OBLIGASINEGARA-*.txt)
@@ -825,7 +1076,7 @@ class TxtBundleService {
                     if (stat.isDirectory()) {
                         filePaths = fs_1.default
                             .readdirSync(p)
-                            .filter((f) => /\.(txt|reg|csv|tsv|dat)$/i.test(f))
+                            .filter((f) => /\.(txt|reg|csv|tsv|dat|xlsx|xls)$/i.test(f))
                             .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
                             .map((f) => path_1.default.join(p, f));
                     }
@@ -922,15 +1173,21 @@ class TxtBundleService {
             for (let fileIdx = 0; fileIdx < filePaths.length; fileIdx++) {
                 const filePath = filePaths[fileIdx];
                 const fileName = path_1.default.basename(filePath);
-                const content = fs_1.default.readFileSync(filePath, 'utf8');
-                const lines = content.split(/\r?\n/).map((l) => l.trim());
-                const isBloomberg = lines.some((l) => l === 'START-OF-FIELDS' || l === 'START-OF-DATA') ||
-                    lines.some((l) => l.startsWith('RUNDATE='));
-                if (isBloomberg) {
-                    this.parseBloombergRows(lines, fileName, bindColumns, batchRows);
+                const isExcel = /\.(xlsx|xls)$/i.test(filePath);
+                if (isExcel) {
+                    this.parseExcelRows(filePath, options.selectedSheet, fileName, bindColumns, batchRows);
                 }
                 else {
-                    this.parseDelimitedRows(lines, fileName, bindColumns, batchRows);
+                    const content = fs_1.default.readFileSync(filePath, 'utf8');
+                    const lines = content.split(/\r?\n/).map((l) => l.trim());
+                    const isBloomberg = lines.some((l) => l === 'START-OF-FIELDS' || l === 'START-OF-DATA') ||
+                        lines.some((l) => l.startsWith('RUNDATE='));
+                    if (isBloomberg) {
+                        this.parseBloombergRows(lines, fileName, bindColumns, batchRows);
+                    }
+                    else {
+                        this.parseDelimitedRows(lines, fileName, bindColumns, batchRows);
+                    }
                 }
                 // Execute batch insert if chunk reached & commit to keep memory & undo log optimal
                 if (batchRows.length >= batchSize) {
@@ -1160,6 +1417,170 @@ class TxtBundleService {
                 return String(val);
             });
             outBatch.push(rowArray);
+        }
+    }
+    /**
+     * Parse rows from Excel file (.xlsx, .xls) for batch import
+     */
+    parseExcelRows(filePath, selectedSheet, fileName, targetColumns, outBatch) {
+        try {
+            const workbook = XLSX.readFile(filePath, { cellDates: true, dense: true });
+            const sheetName = selectedSheet && workbook.Sheets[selectedSheet] ? selectedSheet : workbook.SheetNames[0];
+            if (!sheetName || !workbook.Sheets[sheetName])
+                return;
+            const ws = workbook.Sheets[sheetName];
+            const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+            if (!rows || rows.length < 2)
+                return;
+            const rawHeaders = (rows[0] || []).map((h) => String(h || '').trim().toUpperCase().replace(/[^A-Z0-9_]/g, '_'));
+            for (let i = 1; i < rows.length; i++) {
+                const rowData = rows[i];
+                if (!rowData ||
+                    rowData.length === 0 ||
+                    rowData.every((val) => val === '' || val === null || val === undefined)) {
+                    continue;
+                }
+                const rowMap = {
+                    FILE_NAME: fileName,
+                };
+                rawHeaders.forEach((h, idx) => {
+                    if (h) {
+                        rowMap[h] = rowData[idx];
+                    }
+                });
+                const rowArray = targetColumns.map((col) => {
+                    if (col.sourceType === 'guid' || col.name === 'ID') {
+                        return crypto_1.default.randomUUID();
+                    }
+                    if (col.name === 'LOAD_TIMESTAMP' || col.sourceKey === 'LOAD_TIMESTAMP') {
+                        return new Date();
+                    }
+                    if (col.name === 'FILE_NAME' || col.sourceKey === 'FILE_NAME') {
+                        return fileName;
+                    }
+                    let val = rowMap[col.name];
+                    if (val === undefined && col.sourceKey) {
+                        val = rowMap[col.sourceKey];
+                    }
+                    if (val === undefined && col.sourceIndex !== undefined) {
+                        val = rowData[col.sourceIndex];
+                    }
+                    if (val === undefined || val === null || val === '')
+                        return null;
+                    // Convert numeric if column type is NUMBER
+                    if (col.type && col.type.toUpperCase().startsWith('NUMBER')) {
+                        if (typeof val === 'number')
+                            return isFinite(val) ? val : null;
+                        const cleanStr = String(val).replace(/,/g, '').trim();
+                        if (cleanStr === '' || cleanStr === 'null' || cleanStr === '-')
+                            return null;
+                        const num = parseFloat(cleanStr);
+                        return !isNaN(num) && isFinite(Number(cleanStr)) ? num : null;
+                    }
+                    // Convert Date/Timestamp if column type is DATE or TIMESTAMP
+                    const upperType = col.type ? col.type.toUpperCase() : '';
+                    if (upperType.startsWith('DATE') || upperType.startsWith('TIMESTAMP')) {
+                        return this.parseFlexDate(val);
+                    }
+                    return String(val);
+                });
+                outBatch.push(rowArray);
+            }
+        }
+        catch (err) {
+            console.warn(`Gagal membaca baris Excel dari ${filePath}:`, err);
+        }
+    }
+    /**
+     * Export TXT/CSV/Excel bundle data to an Excel (.xlsx) file
+     */
+    async exportBundleToExcel(sourcePathOrFiles, columns, targetFilePath, selectedSheet, maxRows) {
+        try {
+            let filePaths = [];
+            if (typeof sourcePathOrFiles === 'string') {
+                const p = path_1.default.resolve(sourcePathOrFiles);
+                if (fs_1.default.existsSync(p)) {
+                    const stat = fs_1.default.statSync(p);
+                    if (stat.isDirectory()) {
+                        filePaths = fs_1.default
+                            .readdirSync(p)
+                            .filter((f) => /\.(txt|reg|csv|tsv|dat|xlsx|xls)$/i.test(f))
+                            .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
+                            .map((f) => path_1.default.join(p, f));
+                    }
+                    else {
+                        filePaths = [p];
+                    }
+                }
+            }
+            else if (Array.isArray(sourcePathOrFiles)) {
+                filePaths = sourcePathOrFiles.filter((f) => fs_1.default.existsSync(f));
+            }
+            if (filePaths.length === 0) {
+                throw new Error('Tidak ada file sumber untuk di-export.');
+            }
+            const allRows = [];
+            const rowCap = maxRows || 500000;
+            for (const filePath of filePaths) {
+                if (allRows.length >= rowCap)
+                    break;
+                const fileName = path_1.default.basename(filePath);
+                const isExcel = /\.(xlsx|xls)$/i.test(filePath);
+                if (isExcel) {
+                    this.parseExcelRows(filePath, selectedSheet, fileName, columns, allRows);
+                }
+                else {
+                    const content = fs_1.default.readFileSync(filePath, 'utf8');
+                    const lines = content.split(/\r?\n/).map((l) => l.trim());
+                    const isBloomberg = lines.some((l) => l === 'START-OF-FIELDS' || l === 'START-OF-DATA') ||
+                        lines.some((l) => l.startsWith('RUNDATE='));
+                    if (isBloomberg) {
+                        this.parseBloombergRows(lines, fileName, columns, allRows);
+                    }
+                    else {
+                        this.parseDelimitedRows(lines, fileName, columns, allRows);
+                    }
+                }
+            }
+            const truncatedRows = allRows.slice(0, rowCap);
+            // Sheet 1: Data
+            const headers = columns.map((c) => c.name);
+            const wsData = XLSX.utils.aoa_to_sheet([headers, ...truncatedRows]);
+            wsData['!cols'] = columns.map((c) => ({ wch: Math.max(c.name.length + 4, 15) }));
+            // Sheet 2: Definisi Kolom
+            const metaHeaders = ['No', 'Nama Kolom', 'Tipe Data Oracle', 'Nullable', 'Tipe Sumber', 'Kunci Sumber'];
+            const metaRows = columns.map((col, idx) => [
+                idx + 1,
+                col.name,
+                col.type,
+                col.isNullable ? 'YES' : 'NO',
+                col.sourceType || 'token',
+                col.sourceKey || (col.sourceIndex !== undefined ? `Index ${col.sourceIndex}` : ''),
+            ]);
+            const wsMeta = XLSX.utils.aoa_to_sheet([metaHeaders, ...metaRows]);
+            wsMeta['!cols'] = [{ wch: 6 }, { wch: 25 }, { wch: 20 }, { wch: 10 }, { wch: 15 }, { wch: 25 }];
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, wsData, 'Data');
+            XLSX.utils.book_append_sheet(wb, wsMeta, 'Definisi Kolom');
+            // Ensure directory exists
+            const targetDir = path_1.default.dirname(targetFilePath);
+            if (!fs_1.default.existsSync(targetDir)) {
+                fs_1.default.mkdirSync(targetDir, { recursive: true });
+            }
+            XLSX.writeFile(wb, targetFilePath);
+            return {
+                success: true,
+                targetFilePath,
+                totalRows: truncatedRows.length,
+            };
+        }
+        catch (err) {
+            return {
+                success: false,
+                targetFilePath,
+                totalRows: 0,
+                error: err.message || String(err),
+            };
         }
     }
 }
