@@ -1,6 +1,6 @@
 {
   "name": "zeeniq-oracle-backup-tool",
-  "version": "1.2.101",
+  "version": "1.2.102",
   "main": "dist-electron/main.js",
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.11",
