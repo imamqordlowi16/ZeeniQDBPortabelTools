@@ -177,7 +177,9 @@ class TxtBundleService {
             let hasDecimal = false;
             let isAllDate = true;
             let nonNullCount = 0;
-            for (const row of sampleRows) {
+            // Scan all data rows (up to 50,000 rows) to accurately detect true maximum length
+            const rowsToInspect = dataRows.length > 50000 ? dataRows.slice(0, 50000) : dataRows;
+            for (const row of rowsToInspect) {
                 const val = row[idx];
                 if (val !== null && val !== undefined && String(val).trim() !== '') {
                     nonNullCount++;
@@ -211,11 +213,20 @@ class TxtBundleService {
                 else if (maxLen > 2000) {
                     inferredType = 'CLOB';
                 }
+                else if (maxLen > 1000) {
+                    inferredType = 'VARCHAR2(4000)';
+                }
+                else if (maxLen > 500) {
+                    inferredType = 'VARCHAR2(1000)';
+                }
                 else if (maxLen > 255) {
-                    inferredType = `VARCHAR2(${Math.min(4000, Math.ceil(maxLen * 1.5))})`;
+                    inferredType = 'VARCHAR2(500)';
+                }
+                else if (maxLen > 50) {
+                    inferredType = 'VARCHAR2(255)';
                 }
                 else {
-                    inferredType = `VARCHAR2(${Math.max(50, Math.min(255, Math.ceil(maxLen * 1.5)))})`;
+                    inferredType = 'VARCHAR2(100)';
                 }
             }
             const firstSample = sampleRows.find((r) => r[idx] !== null && r[idx] !== undefined)?.[idx];
@@ -1170,6 +1181,43 @@ class TxtBundleService {
             let totalInsertedRows = 0;
             const batchRows = [];
             const batchSize = options.batchSize || 20000;
+            // Helper to execute batch with auto-heal for ORA-12899 (value too large for column)
+            const executeBatchWithAutoHeal = async (rowsToInsert) => {
+                if (!rowsToInsert || rowsToInsert.length === 0)
+                    return;
+                let retries = 3;
+                while (retries > 0) {
+                    try {
+                        await conn.executeMany(insertSql, rowsToInsert, { autoCommit: false });
+                        return;
+                    }
+                    catch (batchErr) {
+                        const errMsg = batchErr.message || String(batchErr);
+                        // Match ORA-12899: value too large for column "OWNER"."TABLE"."COL" (actual: 72, maximum: 60)
+                        const ora12899 = errMsg.match(/ORA-12899:\s*value too large for column\s*"?([^".\s]+)"?\.?"?([^".\s]+)"?\.?"?([^".\s]+)"?\s*\(actual:\s*(\d+),\s*maximum:\s*(\d+)\)/i);
+                        if (ora12899 && retries > 1) {
+                            const targetCol = ora12899[3];
+                            const actualLen = parseInt(ora12899[4], 10) || 100;
+                            const newLen = Math.min(4000, Math.max(255, Math.ceil(actualLen * 1.5)));
+                            console.log(`[TxtBundleService Auto-Heal] Auto-expanding column "${targetCol}" to VARCHAR2(${newLen}) on ${fullTableName} due to ORA-12899 (actual: ${actualLen})`);
+                            try {
+                                await conn.rollback();
+                            }
+                            catch (rbErr) { }
+                            try {
+                                await conn.execute(`ALTER TABLE ${fullTableName} MODIFY ("${targetCol}" VARCHAR2(${newLen}))`);
+                                retries--;
+                                continue;
+                            }
+                            catch (alterErr) {
+                                console.warn(`[TxtBundleService Auto-Heal] Failed to alter column "${targetCol}":`, alterErr);
+                                throw batchErr;
+                            }
+                        }
+                        throw batchErr;
+                    }
+                }
+            };
             for (let fileIdx = 0; fileIdx < filePaths.length; fileIdx++) {
                 const filePath = filePaths[fileIdx];
                 const fileName = path_1.default.basename(filePath);
@@ -1191,7 +1239,7 @@ class TxtBundleService {
                 }
                 // Execute batch insert if chunk reached & commit to keep memory & undo log optimal
                 if (batchRows.length >= batchSize) {
-                    await conn.executeMany(insertSql, batchRows, { autoCommit: false });
+                    await executeBatchWithAutoHeal(batchRows);
                     totalInsertedRows += batchRows.length;
                     batchRows.length = 0;
                     await conn.commit();
@@ -1209,7 +1257,7 @@ class TxtBundleService {
             }
             // Flush remaining rows
             if (batchRows.length > 0) {
-                await conn.executeMany(insertSql, batchRows, { autoCommit: false });
+                await executeBatchWithAutoHeal(batchRows);
                 totalInsertedRows += batchRows.length;
                 batchRows.length = 0;
             }

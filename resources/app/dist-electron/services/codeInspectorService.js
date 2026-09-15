@@ -1083,6 +1083,7 @@ class CodeInspectorService {
                         processStageLabel,
                         processFlowSummary,
                         parameterMappings,
+                        joins: this.extractSqlJoins(interpolatedSql || sql),
                     });
                 }
             }
@@ -1172,6 +1173,7 @@ class CodeInspectorService {
                             processStageLabel,
                             processFlowSummary,
                             parameterMappings,
+                            joins: this.extractSqlJoins(interpolatedSql || sql),
                         });
                     }
                 }
@@ -1583,30 +1585,73 @@ class CodeInspectorService {
             for (const grid of page.gridViews) {
                 const gridTableSet = new Set();
                 const gridQueryIds = new Set();
-                // 1. Direct page queries
-                for (const q of pageQueries) {
-                    gridQueryIds.add(q.id);
-                    q.referencedTables.forEach((t) => gridTableSet.add(t));
+                let primaryQuery = undefined;
+                // Parse loader method & class from dataLoaderCall or dataSourceVar
+                let loaderMethod = '';
+                let loaderClass = '';
+                const loaderText = grid.dataLoaderCall || grid.dataSourceVar || '';
+                if (loaderText) {
+                    const methodMatch = loaderText.match(/\b([a-zA-Z0-9_]+)\s*\(/);
+                    if (methodMatch) {
+                        loaderMethod = methodMatch[1];
+                    }
+                    const classMatch = loaderText.match(/([a-zA-Z0-9_]+)\.[a-zA-Z0-9_]+\s*\(/);
+                    if (classMatch) {
+                        loaderClass = classMatch[1];
+                    }
                 }
-                // 2. If grid.dataSourceVar references a class or method (e.g. classAuditee.GetAuditeeTable)
-                if (grid.dataSourceVar) {
-                    const words = grid.dataSourceVar.match(/\b([A-Za-z0-9_]{3,})\b/g) || [];
-                    for (const word of words) {
-                        const wLower = word.toLowerCase();
-                        if (['data', 'table', 'viewstate', 'string', 'empty', 'new', 'null', 'void', 'get', 'set'].includes(wLower)) {
-                            continue;
-                        }
-                        const relatedQueries = queries.filter((q) => q.sourceFile.includes(word) ||
-                            q.enclosingClass === word ||
-                            q.sql.includes(word));
-                        for (const rq of relatedQueries) {
-                            gridQueryIds.add(rq.id);
-                            rq.referencedTables.forEach((t) => gridTableSet.add(t));
+                // 1. Resolve Primary Query (Exact SELECT for this grid)
+                if (loaderMethod) {
+                    primaryQuery = queries.find((q) => q.type === 'SELECT' &&
+                        q.enclosingMethod === loaderMethod &&
+                        (!loaderClass || q.enclosingClass === loaderClass || q.sourceFile.includes(loaderClass)));
+                }
+                if (!primaryQuery && loaderClass) {
+                    primaryQuery = queries.find((q) => q.type === 'SELECT' &&
+                        (q.enclosingClass === loaderClass || q.sourceFile.includes(loaderClass)));
+                }
+                if (!primaryQuery) {
+                    primaryQuery = pageQueries.find((q) => q.type === 'SELECT');
+                }
+                if (primaryQuery) {
+                    grid.primaryQueryId = primaryQuery.id;
+                    gridQueryIds.add(primaryQuery.id);
+                    primaryQuery.referencedTables.forEach((t) => gridTableSet.add(t));
+                    if (primaryQuery.joins) {
+                        primaryQuery.joins.forEach((j) => gridTableSet.add(j.table));
+                    }
+                }
+                // 2. Resolve all queries related to the same class / method
+                if (loaderClass) {
+                    const classQueries = queries.filter((q) => q.enclosingClass === loaderClass || q.sourceFile.includes(loaderClass));
+                    for (const cq of classQueries) {
+                        gridQueryIds.add(cq.id);
+                        cq.referencedTables.forEach((t) => gridTableSet.add(t));
+                        if (cq.joins) {
+                            cq.joins.forEach((j) => gridTableSet.add(j.table));
                         }
                     }
                 }
+                // 3. Direct page queries
+                for (const q of pageQueries) {
+                    gridQueryIds.add(q.id);
+                    q.referencedTables.forEach((t) => gridTableSet.add(t));
+                    if (q.joins) {
+                        q.joins.forEach((j) => gridTableSet.add(j.table));
+                    }
+                }
+                // Ensure primaryQueryId is first in referencedQueryIds
+                const allIds = Array.from(gridQueryIds);
+                if (grid.primaryQueryId && allIds.includes(grid.primaryQueryId)) {
+                    grid.referencedQueryIds = [
+                        grid.primaryQueryId,
+                        ...allIds.filter((id) => id !== grid.primaryQueryId),
+                    ];
+                }
+                else {
+                    grid.referencedQueryIds = allIds;
+                }
                 grid.referencedTables = Array.from(gridTableSet);
-                grid.referencedQueryIds = Array.from(gridQueryIds);
                 grid.referencedQueriesCount = gridQueryIds.size;
             }
         }
