@@ -581,6 +581,247 @@ class CodeInspectorService {
         };
     }
     /**
+     * Convert string (PascalCase or camelCase) to UPPER_SNAKE_CASE
+     */
+    toUpperSnakeCase(str) {
+        if (!str)
+            return '';
+        return str
+            .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+            .replace(/[^a-zA-Z0-9_]/g, '_')
+            .replace(/__+/g, '_')
+            .toUpperCase();
+    }
+    /**
+     * Clean raw argument expression into a variable/property name
+     * e.g. "jenisData.AsDbLiteral()" -> "jenisData"
+     * e.g. "posisi.ToString(\"dd/MM/yyyy\").AsDbLiteral()" -> "posisi"
+     * e.g. "model.JenisData.AsDbLiteral()" -> "JenisData"
+     */
+    cleanArgumentVariable(rawArg) {
+        if (!rawArg)
+            return '';
+        let clean = rawArg.trim();
+        clean = clean.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '').trim();
+        clean = clean.replace(/\.(?:AsDbLiteral|ToString|Trim|ToUpper|ToLower|ToShortDateString)\s*\([^)]*\)/gi, '');
+        clean = clean.replace(/\.(?:AsDbLiteral|Trim|ToUpper|ToLower)\b/gi, '');
+        clean = clean.replace(/^\s*\([a-zA-Z0-9_<>?]+\)\s*/, '');
+        clean = clean.replace(/\s+as\s+[a-zA-Z0-9_<>?]+/i, '');
+        const dotParts = clean.split('.');
+        if (dotParts.length > 1) {
+            clean = dotParts[dotParts.length - 1];
+        }
+        return clean.replace(/[^a-zA-Z0-9_]/g, '').trim();
+    }
+    /**
+     * Parse comma-separated arguments from string.Format(..., arg1, arg2)
+     */
+    extractFormatArguments(content, matchIndex, fullMatchLength) {
+        const afterCode = content.substring(matchIndex + fullMatchLength);
+        const beforeCode = content.substring(Math.max(0, matchIndex - 100), matchIndex);
+        const hasFormat = /string\.Format\s*\(\s*$/i.test(beforeCode) || /Format\s*\(\s*$/i.test(beforeCode);
+        const commaMatch = /^\s*,/.exec(afterCode);
+        if (!commaMatch && !hasFormat) {
+            return [];
+        }
+        const commaIndex = afterCode.indexOf(',');
+        if (commaIndex === -1 || commaIndex > 40) {
+            return [];
+        }
+        const args = [];
+        let parenDepth = 1;
+        let inString = false;
+        let quoteChar = '';
+        let currentArg = '';
+        for (let i = commaIndex + 1; i < afterCode.length; i++) {
+            const ch = afterCode[i];
+            const prev = i > 0 ? afterCode[i - 1] : '';
+            if (inString) {
+                if (ch === quoteChar && prev !== '\\') {
+                    inString = false;
+                }
+                currentArg += ch;
+            }
+            else if (ch === '"' || ch === "'") {
+                inString = true;
+                quoteChar = ch;
+                currentArg += ch;
+            }
+            else if (ch === '(' || ch === '[' || ch === '{') {
+                parenDepth++;
+                currentArg += ch;
+            }
+            else if (ch === ')' || ch === ']' || ch === '}') {
+                parenDepth--;
+                if (parenDepth === 0) {
+                    if (currentArg.trim()) {
+                        args.push(currentArg.trim());
+                    }
+                    break;
+                }
+                currentArg += ch;
+            }
+            else if (ch === ',' && parenDepth === 1) {
+                if (currentArg.trim()) {
+                    args.push(currentArg.trim());
+                }
+                currentArg = '';
+            }
+            else {
+                currentArg += ch;
+            }
+        }
+        return args;
+    }
+    /**
+     * Map SQL columns to placeholders like {0}, {1}, etc.
+     * e.g. INSERT INTO LOG_PERUBAHAN_NILAI (COL1, COL2) VALUES ({0}, {1})
+     */
+    parseSqlColumnAndPlaceholderMap(sql) {
+        const map = new Map();
+        if (!sql)
+            return map;
+        const insertMatch = /INSERT\s+INTO\s+[`"\[]?([\w]+)[`"\]]?\s*\(([^)]+)\)\s*VALUES\s*\(([\s\S]+?)\)(?:\s*;|\s*$|\s*\))/i.exec(sql);
+        if (insertMatch) {
+            const colsRaw = insertMatch[2];
+            const valsRaw = insertMatch[3];
+            const columns = colsRaw
+                .split(',')
+                .map((c) => c.replace(/[`"\[\]\s]/g, '').trim())
+                .filter(Boolean);
+            const values = [];
+            let currentVal = '';
+            let paren = 0;
+            for (let i = 0; i < valsRaw.length; i++) {
+                const c = valsRaw[i];
+                if (c === '(')
+                    paren++;
+                else if (c === ')')
+                    paren--;
+                if (c === ',' && paren === 0) {
+                    values.push(currentVal.trim());
+                    currentVal = '';
+                }
+                else {
+                    currentVal += c;
+                }
+            }
+            if (currentVal.trim()) {
+                values.push(currentVal.trim());
+            }
+            for (let idx = 0; idx < values.length && idx < columns.length; idx++) {
+                const val = values[idx];
+                const col = columns[idx];
+                const phMatch = /\{(\d+)\}/.exec(val);
+                if (phMatch) {
+                    const phIndex = parseInt(phMatch[1], 10);
+                    map.set(phIndex, col);
+                }
+            }
+        }
+        const commentRegex = /\{(\d+)\}\s*(?:\/\*\s*([a-zA-Z0-9_]+)\s*\*\/|--\s*([a-zA-Z0-9_]+))/g;
+        let cMatch;
+        while ((cMatch = commentRegex.exec(sql)) !== null) {
+            const phIndex = parseInt(cMatch[1], 10);
+            const col = (cMatch[2] || cMatch[3])?.trim();
+            if (col && !map.has(phIndex)) {
+                map.set(phIndex, col);
+            }
+        }
+        return map;
+    }
+    /**
+     * Scan single C# file for Model / Entity classes and properties
+     */
+    scanModelFile(filePath, relFile) {
+        const models = [];
+        try {
+            const content = fs_1.default.readFileSync(filePath, 'utf8');
+            if (content.length > 2 * 1024 * 1024)
+                return [];
+            if (!content.includes('class ') || !content.includes('{ get; set; }')) {
+                return [];
+            }
+            const nsMatch = /namespace\s+([a-zA-Z0-9_\.]+)/.exec(content);
+            const namespace = nsMatch ? nsMatch[1] : undefined;
+            const classRegex = /(?:\[(?:Table|TableName)\s*\(\s*(?:Name\s*=\s*)?["']([^"']+)["']\s*\)\][\s\r\n]*)?(?:public|internal|protected)?\s*(?:partial\s+)?class\s+([a-zA-Z0-9_]+)(?:\s*:\s*([a-zA-Z0-9_,\s\<\>]+))?\s*\{/g;
+            let classMatch;
+            while ((classMatch = classRegex.exec(content)) !== null) {
+                const tableAttr = classMatch[1]?.trim();
+                const className = classMatch[2]?.trim();
+                const inherits = classMatch[3]?.trim() || '';
+                const lowerInherits = inherits.toLowerCase();
+                if (lowerInherits.includes('page') ||
+                    lowerInherits.includes('usercontrol') ||
+                    lowerInherits.includes('form') ||
+                    lowerInherits.includes('controller') ||
+                    lowerInherits.includes('dbcontext')) {
+                    continue;
+                }
+                const classStartIndex = classMatch.index + classMatch[0].length;
+                let braceCount = 1;
+                let classEndIndex = classStartIndex;
+                for (let i = classStartIndex; i < content.length; i++) {
+                    if (content[i] === '{')
+                        braceCount++;
+                    else if (content[i] === '}') {
+                        braceCount--;
+                        if (braceCount === 0) {
+                            classEndIndex = i;
+                            break;
+                        }
+                    }
+                }
+                const classBody = content.substring(classStartIndex, classEndIndex);
+                const propRegex = /(?:\[(?:Column|ColumnName)\s*\(\s*(?:Name\s*=\s*)?["']([^"']+)["']\s*\)\][\s\r\n]*)?(?:public|internal)\s+(?:virtual\s+|override\s+)?([a-zA-Z0-9_<>?\[\],\s]+?)\s+([a-zA-Z0-9_]+)\s*\{\s*get;\s*set;\s*\}/g;
+                const properties = [];
+                let propMatch;
+                while ((propMatch = propRegex.exec(classBody)) !== null) {
+                    const colAttr = propMatch[1]?.trim();
+                    const rawType = propMatch[2]?.trim();
+                    const propName = propMatch[3]?.trim();
+                    if (propName && rawType) {
+                        const isNullable = rawType.includes('?') || rawType.startsWith('Nullable<');
+                        properties.push({
+                            name: propName,
+                            type: rawType,
+                            isNullable,
+                            dbColumn: colAttr || this.toUpperSnakeCase(propName),
+                        });
+                    }
+                }
+                const relLower = relFile.toLowerCase();
+                const isModelFolder = relLower.includes('model') ||
+                    relLower.includes('entit') ||
+                    relLower.includes('dto') ||
+                    relLower.includes('domain') ||
+                    relLower.includes('data');
+                if (properties.length >= 2 || tableAttr || (properties.length >= 1 && isModelFolder)) {
+                    let targetTable = tableAttr;
+                    if (!targetTable) {
+                        const cleanClassName = className.replace(/(Model|Entity|Dto|DTO|Table)$/i, '');
+                        targetTable = this.toUpperSnakeCase(cleanClassName || className);
+                    }
+                    models.push({
+                        id: `model-${Buffer.from(relFile + className).toString('hex').substring(0, 10)}`,
+                        name: className,
+                        namespace,
+                        sourceFile: filePath,
+                        relativeSourceFile: relFile,
+                        targetTable,
+                        properties,
+                        referencedQueriesCount: 0,
+                        occurrences: [],
+                    });
+                }
+            }
+        }
+        catch (e) {
+            console.warn(`Could not scan model file ${filePath}:`, e.message);
+        }
+        return models;
+    }
+    /**
      * Smart resolver for dynamic SQL string.Format arguments, e.g.
      * string.Format(@"SELECT * FROM TABLE({0}({1}, {2}, {3}))", arg0, ...)
      * or "SELECT * FROM TABLE({0}(...))"
@@ -606,12 +847,12 @@ class CodeInspectorService {
             }
             else {
                 // Case 2: Identifier / variable / property, e.g. arg0, functionName, Constant.DSSK_FUNC
-                const varName = rawArg.split('.').pop()?.trim() || '';
+                const varName = this.cleanArgumentVariable(rawArg);
                 // If variable name itself is in UPPER_SNAKE_CASE (e.g. DSSK_KELOMPOK_BANK_BYDATEUSER)
                 if (/^[A-Z0-9_]{3,}$/.test(varName)) {
                     resolvedName = varName;
                 }
-                else if (varName) {
+                else if (/^[a-zA-Z0-9_]+$/.test(varName)) {
                     // Look backward in the method/content for: varName = "..." or varName = @"..."
                     const beforeCode = content.substring(Math.max(0, matchIndex - 2500), matchIndex);
                     const assignRegex = new RegExp(`\\b${varName}\\s*=\\s*@?["']([^"']+)["']`, 'i');
@@ -646,7 +887,7 @@ class CodeInspectorService {
                 resolvedName = fnLiteralMatch[1].trim();
             }
         }
-        if (resolvedName) {
+        if (resolvedName && (sql.includes('TABLE({0}') || /\b(?:FROM|JOIN)\s*\{0\}/i.test(sql))) {
             // Replace {0} with the resolved function name in SQL
             sql = sql.replace(/\{0\}/g, resolvedName);
             dynamicFunctions.push(resolvedName);
@@ -720,6 +961,23 @@ class CodeInspectorService {
                         qType = 'MERGE';
                     const { processStage, processStageLabel, processFlowSummary } = this.inferProcessFlow(enclosingMethod, qType, sql, menuBreadcrumb);
                     const targetIdentifier = entities.tables[0] || entities.procedures[0] || entities.functions[0] || path_1.default.basename(relFile);
+                    // Extract parameter mappings if string.Format is used
+                    const formatArgs = this.extractFormatArguments(content, match.index, fullMatch.length);
+                    let parameterMappings;
+                    if (formatArgs.length > 0) {
+                        const colMap = this.parseSqlColumnAndPlaceholderMap(sql);
+                        parameterMappings = formatArgs.map((rawArg, idx) => {
+                            const cleanVar = this.cleanArgumentVariable(rawArg);
+                            const col = colMap.get(idx);
+                            return {
+                                index: idx,
+                                placeholder: `{${idx}}`,
+                                column: col,
+                                rawArgument: rawArg,
+                                cleanVariable: cleanVar,
+                            };
+                        });
+                    }
                     queries.push({
                         id: `sql-${Buffer.from(relFile + lineNum + counter++).toString('hex').substring(0, 10)}`,
                         name: `${qType} (${targetIdentifier})`,
@@ -739,6 +997,7 @@ class CodeInspectorService {
                         processStage,
                         processStageLabel,
                         processFlowSummary,
+                        parameterMappings,
                     });
                 }
             }
@@ -772,6 +1031,23 @@ class CodeInspectorService {
                             qType = 'MERGE';
                         const { processStage, processStageLabel, processFlowSummary } = this.inferProcessFlow(enclosingMethod, qType, sql, menuBreadcrumb);
                         const targetIdentifier = entities.tables[0] || entities.procedures[0] || entities.functions[0] || path_1.default.basename(relFile);
+                        // Extract parameter mappings if string.Format is used
+                        const formatArgs = this.extractFormatArguments(content, match.index, match[0].length);
+                        let parameterMappings;
+                        if (formatArgs.length > 0) {
+                            const colMap = this.parseSqlColumnAndPlaceholderMap(sql);
+                            parameterMappings = formatArgs.map((rawArg, idx) => {
+                                const cleanVar = this.cleanArgumentVariable(rawArg);
+                                const col = colMap.get(idx);
+                                return {
+                                    index: idx,
+                                    placeholder: `{${idx}}`,
+                                    column: col,
+                                    rawArgument: rawArg,
+                                    cleanVariable: cleanVar,
+                                };
+                            });
+                        }
                         queries.push({
                             id: `sql-${Buffer.from(relFile + lineNum + counter++).toString('hex').substring(0, 10)}`,
                             name: `${qType} (${targetIdentifier})`,
@@ -791,6 +1067,7 @@ class CodeInspectorService {
                             processStage,
                             processStageLabel,
                             processFlowSummary,
+                            parameterMappings,
                         });
                     }
                 }
@@ -846,6 +1123,7 @@ class CodeInspectorService {
         const projects = [];
         const connections = [];
         const queries = [];
+        const models = [];
         let totalFilesScanned = 0;
         const walk = (currentDir) => {
             const items = fs_1.default.readdirSync(currentDir, { withFileTypes: true });
@@ -886,6 +1164,13 @@ class CodeInspectorService {
                         const conns = this.parseJsonConfigFile(full, rel);
                         connections.push(...conns);
                     }
+                    // Parse C# Models & Entities
+                    if (ext === '.cs') {
+                        const fileModels = this.scanModelFile(full, rel);
+                        if (fileModels.length > 0) {
+                            models.push(...fileModels);
+                        }
+                    }
                     // Parse Embedded SQL & Stored Procedures from Source Code
                     if (this.sourceCodeExtensions.has(ext)) {
                         const fileQueries = this.scanSourceFile(full, rel);
@@ -895,6 +1180,60 @@ class CodeInspectorService {
             }
         };
         walk(folderPath);
+        // Link queries with target models & parameter mappings
+        const modelByTable = new Map();
+        const modelByName = new Map();
+        for (const m of models) {
+            if (m.targetTable) {
+                modelByTable.set(m.targetTable.toUpperCase(), m);
+            }
+            modelByName.set(m.name.toUpperCase(), m);
+            const snake = this.toUpperSnakeCase(m.name);
+            if (!modelByTable.has(snake)) {
+                modelByTable.set(snake, m);
+            }
+        }
+        for (const q of queries) {
+            let matchedModel;
+            for (const t of q.referencedTables) {
+                const tUpper = t.toUpperCase();
+                if (modelByTable.has(tUpper)) {
+                    matchedModel = modelByTable.get(tUpper);
+                    break;
+                }
+                if (modelByName.has(tUpper)) {
+                    matchedModel = modelByName.get(tUpper);
+                    break;
+                }
+            }
+            if (matchedModel) {
+                q.targetModel = matchedModel.name;
+                matchedModel.referencedQueriesCount++;
+                matchedModel.occurrences = matchedModel.occurrences || [];
+                matchedModel.occurrences.push({
+                    file: q.sourceFile,
+                    relativeFile: q.relativeSourceFile,
+                    lineNumber: q.lineNumber,
+                    operation: q.type,
+                    snippet: q.codeContextSnippet,
+                });
+                if (q.parameterMappings) {
+                    for (const pm of q.parameterMappings) {
+                        const matchProp = matchedModel.properties.find((p) => {
+                            const pUpper = p.name.toUpperCase();
+                            const colUpper = pm.column?.toUpperCase();
+                            const varUpper = pm.cleanVariable.toUpperCase();
+                            const dbUpper = p.dbColumn?.toUpperCase();
+                            return ((colUpper && (pUpper === colUpper || dbUpper === colUpper)) ||
+                                (varUpper && (pUpper === varUpper || dbUpper === varUpper)));
+                        });
+                        if (matchProp) {
+                            pm.modelProperty = matchProp.name;
+                        }
+                    }
+                }
+            }
+        }
         // Aggregate Tables
         const tableMap = new Map();
         for (const q of queries) {
@@ -977,12 +1316,14 @@ class CodeInspectorService {
         }
         const tables = Array.from(tableMap.values()).sort((a, b) => b.referencedCount - a.referencedCount);
         const procedures = Array.from(procMap.values()).sort((a, b) => b.calledCount - a.calledCount);
+        const sortedModels = models.sort((a, b) => b.referencedQueriesCount - a.referencedQueriesCount || a.name.localeCompare(b.name));
         const stats = {
             totalFilesScanned,
             totalConnectionsFound: connections.length,
             totalQueriesFound: queries.length,
             totalTablesFound: tables.length,
             totalProceduresFound: procedures.length,
+            totalModelsFound: sortedModels.length,
             durationMs: Date.now() - startTime,
         };
         return {
@@ -994,6 +1335,7 @@ class CodeInspectorService {
             queries,
             tables,
             procedures,
+            models: sortedModels,
         };
     }
 }
