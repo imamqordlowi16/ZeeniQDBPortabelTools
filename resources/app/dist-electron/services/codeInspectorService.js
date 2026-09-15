@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.codeInspectorService = exports.CodeInspectorService = void 0;
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
+const crypto_1 = __importDefault(require("crypto"));
 class CodeInspectorService {
     ignoredDirectories = new Set([
         'bin',
@@ -622,7 +623,10 @@ class CodeInspectorService {
         if (dotParts.length > 1) {
             clean = dotParts[dotParts.length - 1];
         }
-        return clean.replace(/[^a-zA-Z0-9_]/g, '').trim();
+        clean = clean.replace(/[^a-zA-Z0-9_]/g, '').trim();
+        // 6. Strip leading _param_ or param_ or _param prefixes
+        clean = clean.replace(/^_+param_+/i, '').replace(/^param_+/i, '').replace(/^_+param/i, '').trim();
+        return clean;
     }
     /**
      * Build interpolated SQL query by replacing placeholders like {0}, {1}
@@ -1031,7 +1035,7 @@ class CodeInspectorService {
                     }
                     const targetIdentifier = entities.tables[0] || entities.procedures[0] || entities.functions[0] || path_1.default.basename(relFile);
                     queries.push({
-                        id: `sql-${Buffer.from(relFile + lineNum + counter++).toString('hex').substring(0, 10)}`,
+                        id: `sql-${crypto_1.default.createHash('md5').update(`${relFile}:${lineNum}:${counter++}`).digest('hex').substring(0, 16)}`,
                         name: `${qType} (${targetIdentifier})`,
                         type: qType,
                         sql,
@@ -1120,7 +1124,7 @@ class CodeInspectorService {
                         }
                         const targetIdentifier = entities.tables[0] || entities.procedures[0] || entities.functions[0] || path_1.default.basename(relFile);
                         queries.push({
-                            id: `sql-${Buffer.from(relFile + lineNum + counter++).toString('hex').substring(0, 10)}`,
+                            id: `sql-${crypto_1.default.createHash('md5').update(`${relFile}:${lineNum}:${counter++}`).digest('hex').substring(0, 16)}`,
                             name: `${qType} (${targetIdentifier})`,
                             type: qType,
                             sql,
@@ -1294,7 +1298,7 @@ class CodeInspectorService {
                         const matchProp = matchedModel.properties.find((p) => {
                             const pUpper = p.name.toUpperCase();
                             const colUpper = pm.column?.toUpperCase();
-                            const varUpper = pm.cleanVariable.toUpperCase();
+                            const varUpper = (pm.cleanVariable || '').toUpperCase();
                             const dbUpper = p.dbColumn?.toUpperCase();
                             return ((colUpper && (pUpper === colUpper || dbUpper === colUpper)) ||
                                 (varUpper && (pUpper === varUpper || dbUpper === varUpper)));
