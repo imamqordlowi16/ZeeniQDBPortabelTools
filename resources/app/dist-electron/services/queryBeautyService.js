@@ -218,7 +218,8 @@ class QueryBeautyService {
                 if (!ws) {
                     throw new Error(`Worksheet "${activeSheet}" tidak ditemukan.`);
                 }
-                rawData = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', blankrows: false });
+                // Use blankrows: true so row index matches exact Excel coordinates
+                rawData = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', blankrows: true });
             }
             else {
                 // Delimited or CSV
@@ -274,12 +275,17 @@ class QueryBeautyService {
                 const rawVal = String(row[targetColIdx] ?? '').trim();
                 if (rawVal.length > 0) {
                     const beautified = beautifyOracleQuery(rawVal);
+                    const actualExcelRow = headerIdx + 1 + rIdx;
+                    const cellAddress = XLSX.utils.encode_cell({ r: actualExcelRow, c: targetColIdx });
                     // Extract preview label (e.g. ID_KOMPONEN, NAMA_KOMPONEN, or first column)
                     const firstColVal = String(row[0] || '').trim();
                     const secondColVal = String(row[1] || '').trim();
                     const label = firstColVal && secondColVal ? `${firstColVal} - ${secondColVal}` : firstColVal || `Baris ${rIdx + 1}`;
                     queryRows.push({
                         rowIdx: rIdx + 1,
+                        cellRef: cellAddress,
+                        excelRow: actualExcelRow,
+                        excelCol: targetColIdx,
                         rawSql: rawVal,
                         beautifiedSql: beautified,
                         previewLabel: label,
@@ -322,6 +328,7 @@ class QueryBeautyService {
     /**
      * Save beautified queries back to an updated Excel file
      * Updates cells in-place to preserve styles, sheet configurations, and other columns!
+     * Automatically handles file locks (EBUSY) if open in Excel by creating a fallback copy.
      */
     saveBeautifiedExcel(sourcePath, targetPath, sheetName, columnName, beautifiedMap) {
         try {
@@ -336,7 +343,7 @@ class QueryBeautyService {
             if (!ws) {
                 throw new Error(`Worksheet "${activeSheet}" tidak ditemukan.`);
             }
-            const rawData = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', blankrows: false });
+            const rawData = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', blankrows: true });
             if (rawData.length === 0) {
                 throw new Error('Worksheet kosong.');
             }
@@ -351,29 +358,54 @@ class QueryBeautyService {
                 throw new Error(`Kolom "${columnName}" tidak ditemukan dalam worksheet.`);
             }
             let updatedCount = 0;
-            // Update cells directly via address encoding to preserve formatting & other columns
-            for (let rIdx = headerIdx + 1; rIdx < rawData.length; rIdx++) {
-                const rowNumber = rIdx - headerIdx; // 1-indexed row number matching queryRows
-                if (beautifiedMap[rowNumber] !== undefined) {
-                    const cellRef = XLSX.utils.encode_cell({ r: rIdx, c: colIdx });
-                    const newText = beautifiedMap[rowNumber];
-                    if (ws[cellRef]) {
-                        ws[cellRef].v = newText;
-                        ws[cellRef].t = 's';
-                        delete ws[cellRef].w; // clear cached formatted text
-                    }
-                    else {
-                        ws[cellRef] = { t: 's', v: newText };
-                    }
-                    updatedCount++;
+            // Update cells directly via address encoding or cellRef to preserve formatting & other columns
+            for (const [key, newText] of Object.entries(beautifiedMap)) {
+                if (!newText && newText !== '')
+                    continue;
+                let cellRef = key;
+                if (/^\d+$/.test(key)) {
+                    const rowNum = parseInt(key, 10);
+                    const r = headerIdx + rowNum;
+                    cellRef = XLSX.utils.encode_cell({ r, c: colIdx });
+                }
+                if (ws[cellRef]) {
+                    ws[cellRef].v = newText;
+                    ws[cellRef].t = 's';
+                    delete ws[cellRef].w; // clear cached formatted text
+                }
+                else {
+                    ws[cellRef] = { t: 's', v: newText };
+                }
+                updatedCount++;
+            }
+            let finalPath = resolvedTarget;
+            let warningMsg;
+            // Write updated workbook with lock protection
+            try {
+                XLSX.writeFile(wb, resolvedTarget);
+            }
+            catch (writeErr) {
+                // If file is locked by Microsoft Excel (EBUSY / EPERM)
+                if (writeErr.code === 'EBUSY' ||
+                    writeErr.code === 'EPERM' ||
+                    /busy|locked|permission/i.test(writeErr.message || '')) {
+                    const dir = path_1.default.dirname(resolvedTarget);
+                    const ext = path_1.default.extname(resolvedTarget);
+                    const base = path_1.default.basename(resolvedTarget, ext);
+                    const fallbackTarget = path_1.default.join(dir, `${base}_beautified${ext}`);
+                    XLSX.writeFile(wb, fallbackTarget);
+                    finalPath = fallbackTarget;
+                    warningMsg = `File sedang dibuka di Microsoft Excel. Seluruh query (${updatedCount} baris) berhasil disimpan ke salinan berkas baru: ${path_1.default.basename(fallbackTarget)}`;
+                }
+                else {
+                    throw writeErr;
                 }
             }
-            // Write updated workbook
-            XLSX.writeFile(wb, resolvedTarget);
             return {
                 success: true,
-                targetPath: resolvedTarget,
+                targetPath: finalPath,
                 totalUpdated: updatedCount,
+                warning: warningMsg,
             };
         }
         catch (err) {
