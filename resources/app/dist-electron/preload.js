@@ -136,6 +136,11 @@ const electronAPI = {
     },
     // Codebase & Application DB Inspector
     codeInspectorScan: (folderPath) => electron_1.ipcRenderer.invoke('code-inspector:scan', folderPath),
+    onCodeInspectorProgress: (callback) => {
+        const listener = (_, progress) => callback(progress);
+        electron_1.ipcRenderer.on('code-inspector:progress', listener);
+        return () => electron_1.ipcRenderer.removeListener('code-inspector:progress', listener);
+    },
     codeInspectorTraceCustomConstants: (snippet, queries, uiPages) => electron_1.ipcRenderer.invoke('code-inspector:trace-custom-constants', snippet, queries, uiPages),
     // Query Beauty
     queryBeautyReadColumn: (filePath, sheetName, columnName) => electron_1.ipcRenderer.invoke('query-beauty:read-column', filePath, sheetName, columnName),

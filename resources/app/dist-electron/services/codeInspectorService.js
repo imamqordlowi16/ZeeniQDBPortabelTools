@@ -14,6 +14,8 @@ class CodeInspectorService {
         '.git',
         '.vs',
         '.vscode',
+        '.svn',
+        '.hg',
         'node_modules',
         'dist',
         'packages',
@@ -33,7 +35,22 @@ class CodeInspectorService {
         'images',
         'img',
         'static',
+        'logs',
+        'log',
+        'app_data',
+        'uploads',
+        'upload',
+        'downloads',
+        'download',
+        'backups',
+        'backup',
+        'docs',
+        'documentation',
+        'help',
     ]);
+    escapeRegExp(str) {
+        return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
     sourceCodeExtensions = new Set([
         '.cs',
         '.vb',
@@ -1010,7 +1027,7 @@ class CodeInspectorService {
      * Cross-references constant classes with scanned queries and UI pages
      * Optimized with pre-indexed lookups to execute in sub-10ms without freezing
      */
-    linkConstantsWithQueries(constantClasses, queries, uiPages) {
+    async linkConstantsWithQueries(constantClasses, queries, uiPages) {
         const allConstants = [];
         const fastQueries = queries.map((q) => {
             const combined = `${q.sql || ''} ${q.codeContextSnippet || ''}`;
@@ -1048,9 +1065,14 @@ class CodeInspectorService {
                 }
             }
         }
-        // 3. Fast scan for each constant
+        // 3. Fast scan for each constant (yielding to event loop every 30 items)
+        let processedConstants = 0;
         for (const cClass of constantClasses) {
             for (const c of cClass.constants) {
+                processedConstants++;
+                if (processedConstants % 30 === 0) {
+                    await new Promise((resolve) => setImmediate(resolve));
+                }
                 const nameUpper = c.name ? c.name.toUpperCase() : '';
                 const classConstUpper = c.className && c.name ? `${c.className}.${c.name}`.toUpperCase() : null;
                 const valUpper = (c.value || '').trim().toUpperCase();
@@ -1776,6 +1798,9 @@ class CodeInspectorService {
      */
     scanUiPageFile(filePath, rootPath) {
         try {
+            const stat = fs_1.default.statSync(filePath);
+            if (stat.size > 2 * 1024 * 1024)
+                return null; // Skip files > 2MB
             const content = fs_1.default.readFileSync(filePath, 'utf8');
             const ext = path_1.default.extname(filePath).toLowerCase();
             if (ext !== '.aspx' && ext !== '.ascx')
@@ -1802,25 +1827,34 @@ class CodeInspectorService {
             let codeBehindPath = undefined;
             let relativeCodeBehindPath = undefined;
             if (fs_1.default.existsSync(csPath)) {
-                csContent = fs_1.default.readFileSync(csPath, 'utf8');
-                codeBehindPath = csPath;
-                relativeCodeBehindPath = path_1.default.relative(rootPath, csPath).replace(/\\/g, '/');
-                // Form ID e.g. IdForm = "DSSK-888"
-                const idFormMatch = csContent.match(/\bIdForm\s*=\s*["']([^"']+)["']/i);
-                if (idFormMatch) {
-                    formId = idFormMatch[1].trim();
+                try {
+                    const csStat = fs_1.default.statSync(csPath);
+                    if (csStat.size <= 3 * 1024 * 1024) {
+                        csContent = fs_1.default.readFileSync(csPath, 'utf8');
+                        codeBehindPath = csPath;
+                        relativeCodeBehindPath = path_1.default.relative(rootPath, csPath).replace(/\\/g, '/');
+                        // Form ID e.g. IdForm = "DSSK-888"
+                        const idFormMatch = csContent.match(/\bIdForm\s*=\s*["']([^"']+)["']/i);
+                        if (idFormMatch) {
+                            formId = idFormMatch[1].trim();
+                        }
+                    }
+                }
+                catch {
+                    // ignore cs read error
                 }
             }
             // Parse code-behind binding calls
             const bindingCalls = csContent ? this.parseUiBindingCalls(csContent, relativeCodeBehindPath || '') : [];
             const gridViews = [];
             // Regex for Grids (RadGrid, GridView, DataGrid, ASPxGridView)
-            const gridRegex = /<(telerik:RadGrid|asp:GridView|asp:DataGrid|dx:ASPxGridView)\s+([^>]+)>([\s\S]*?)<\/\1>/gi;
+            // Safely handles both self-closing (<telerik:RadGrid ... />) and block (<telerik:RadGrid ...>...</telerik:RadGrid>)
+            const gridRegex = /<(telerik:RadGrid|asp:GridView|asp:DataGrid|dx:ASPxGridView)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/\1>)/gi;
             let m;
             while ((m = gridRegex.exec(content)) !== null) {
                 const gridType = m[1];
                 const attrs = m[2];
-                const body = m[3];
+                const body = m[3] || '';
                 const idMatch = attrs.match(/\bID\s*=\s*["']([^"']+)["']/i);
                 const gridId = idMatch ? idMatch[1] : `Grid_${gridViews.length + 1}`;
                 const charIndex = m.index;
@@ -1830,11 +1864,13 @@ class CodeInspectorService {
                 let dataSourceVar = undefined;
                 let dataLoaderClassOrMethod = undefined;
                 if (csContent) {
-                    const dsRegex = new RegExp(`\\b${gridId}\\.DataSource\\s*=\\s*([^;\\r\\n]+);`, 'i');
+                    const safeGridId = this.escapeRegExp(gridId);
+                    const dsRegex = new RegExp(`\\b${safeGridId}\\.DataSource\\s*=\\s*([^;\\r\\n]+);`, 'i');
                     const dsMatch = csContent.match(dsRegex);
                     if (dsMatch) {
                         dataSourceVar = dsMatch[1].trim();
-                        const assignRegex = new RegExp(`\\b${dataSourceVar}\\s*=\\s*([^;\\r\\n]+);`, 'g');
+                        const safeDsVar = this.escapeRegExp(dataSourceVar);
+                        const assignRegex = new RegExp(`\\b${safeDsVar}\\s*=\\s*([^;\\r\\n]+);`, 'g');
                         let am;
                         while ((am = assignRegex.exec(csContent)) !== null) {
                             const val = am[1].trim();
@@ -1942,8 +1978,9 @@ class CodeInspectorService {
     }
     /**
      * Main scan function for a folder / codebase
+     * Fully asynchronous and non-blocking with event-loop yielding to prevent UI freezes
      */
-    scanFolder(folderPath) {
+    async scanFolder(folderPath, onProgress) {
         const startTime = Date.now();
         if (!fs_1.default.existsSync(folderPath)) {
             throw new Error(`Folder tidak ditemukan: ${folderPath}`);
@@ -1956,8 +1993,14 @@ class CodeInspectorService {
         const uiPages = [];
         const constantClasses = [];
         let totalFilesScanned = 0;
-        const walk = (currentDir) => {
-            const items = fs_1.default.readdirSync(currentDir, { withFileTypes: true });
+        const walk = async (currentDir) => {
+            let items = [];
+            try {
+                items = fs_1.default.readdirSync(currentDir, { withFileTypes: true });
+            }
+            catch {
+                return;
+            }
             for (const item of items) {
                 const full = path_1.default.join(currentDir, item.name);
                 const rel = path_1.default.relative(folderPath, full);
@@ -1966,10 +2009,21 @@ class CodeInspectorService {
                     if (this.ignoredDirectories.has(dirLower) || dirLower.startsWith('.')) {
                         continue;
                     }
-                    walk(full);
+                    await walk(full);
                 }
                 else {
                     totalFilesScanned++;
+                    // Yield to Electron event loop every 15 files to keep window responsive
+                    if (totalFilesScanned % 15 === 0) {
+                        if (onProgress) {
+                            onProgress({
+                                currentFile: rel,
+                                scannedFiles: totalFilesScanned,
+                                queriesFound: queries.length,
+                            });
+                        }
+                        await new Promise((resolve) => setImmediate(resolve));
+                    }
                     const ext = path_1.default.extname(item.name).toLowerCase();
                     const baseName = item.name.toLowerCase();
                     // Skip minified libraries, map files, and designer auto-generated files
@@ -2021,9 +2075,12 @@ class CodeInspectorService {
                 }
             }
         };
-        walk(folderPath);
+        await walk(folderPath);
+        // Yield before intensive post-processing
+        await new Promise((resolve) => setImmediate(resolve));
         // Resolve UI GridView parameters and binding constants
         this.resolveUiBindingConstants(uiPages, constantClasses);
+        await new Promise((resolve) => setImmediate(resolve));
         // Link queries with target models & parameter mappings
         const modelByTable = new Map();
         const modelByName = new Map();
@@ -2161,10 +2218,44 @@ class CodeInspectorService {
         const tables = Array.from(tableMap.values()).sort((a, b) => b.referencedCount - a.referencedCount);
         const procedures = Array.from(procMap.values()).sort((a, b) => b.calledCount - a.calledCount);
         const sortedModels = models.sort((a, b) => b.referencedQueriesCount - a.referencedQueriesCount || a.name.localeCompare(b.name));
-        // Cross-link UI GridViews with queries and database tables
+        // Build O(1) query indexes for lightning fast GridView cross-linking
+        const queriesBySourceFile = new Map();
+        const queriesByClass = new Map();
+        const selectQueriesByMethod = new Map();
+        for (const q of queries) {
+            if (q.sourceFile) {
+                let sList = queriesBySourceFile.get(q.sourceFile);
+                if (!sList) {
+                    sList = [];
+                    queriesBySourceFile.set(q.sourceFile, sList);
+                }
+                sList.push(q);
+            }
+            if (q.enclosingClass) {
+                const cKey = q.enclosingClass.toUpperCase();
+                let cList = queriesByClass.get(cKey);
+                if (!cList) {
+                    cList = [];
+                    queriesByClass.set(cKey, cList);
+                }
+                cList.push(q);
+            }
+            if (q.type === 'SELECT' && q.enclosingMethod) {
+                const mKey = q.enclosingMethod.toUpperCase();
+                let mList = selectQueriesByMethod.get(mKey);
+                if (!mList) {
+                    mList = [];
+                    selectQueriesByMethod.set(mKey, mList);
+                }
+                mList.push(q);
+            }
+        }
+        // Cross-link UI GridViews with queries and database tables in O(1) time
         for (const page of uiPages) {
-            const pageQueries = queries.filter((q) => q.sourceFile === page.fullPath ||
-                (page.codeBehindPath && q.sourceFile === page.codeBehindPath));
+            const pageQueries = [
+                ...(queriesBySourceFile.get(page.fullPath) || []),
+                ...(page.codeBehindPath ? queriesBySourceFile.get(page.codeBehindPath) || [] : []),
+            ];
             for (const grid of page.gridViews) {
                 const gridTableSet = new Set();
                 const gridQueryIds = new Set();
@@ -2183,15 +2274,14 @@ class CodeInspectorService {
                         loaderClass = classMatch[1];
                     }
                 }
-                // 1. Resolve Primary Query (Exact SELECT for this grid)
+                // 1. Resolve Primary Query (Exact SELECT for this grid using indexed lookup)
                 if (loaderMethod) {
-                    primaryQuery = queries.find((q) => q.type === 'SELECT' &&
-                        q.enclosingMethod === loaderMethod &&
-                        (!loaderClass || q.enclosingClass === loaderClass || q.sourceFile.includes(loaderClass)));
+                    const methodCandidates = selectQueriesByMethod.get(loaderMethod.toUpperCase()) || [];
+                    primaryQuery = methodCandidates.find((q) => !loaderClass || q.enclosingClass?.toUpperCase() === loaderClass.toUpperCase() || q.sourceFile.includes(loaderClass));
                 }
                 if (!primaryQuery && loaderClass) {
-                    primaryQuery = queries.find((q) => q.type === 'SELECT' &&
-                        (q.enclosingClass === loaderClass || q.sourceFile.includes(loaderClass)));
+                    const classCandidates = queriesByClass.get(loaderClass.toUpperCase()) || [];
+                    primaryQuery = classCandidates.find((q) => q.type === 'SELECT');
                 }
                 if (!primaryQuery) {
                     primaryQuery = pageQueries.find((q) => q.type === 'SELECT');
@@ -2204,9 +2294,9 @@ class CodeInspectorService {
                         primaryQuery.joins.forEach((j) => gridTableSet.add(j.table));
                     }
                 }
-                // 2. Resolve all queries related to the same class / method
+                // 2. Resolve all queries related to the same class using indexed lookup
                 if (loaderClass) {
-                    const classQueries = queries.filter((q) => q.enclosingClass === loaderClass || q.sourceFile.includes(loaderClass));
+                    const classQueries = queriesByClass.get(loaderClass.toUpperCase()) || [];
                     for (const cq of classQueries) {
                         gridQueryIds.add(cq.id);
                         cq.referencedTables.forEach((t) => gridTableSet.add(t));
@@ -2239,8 +2329,9 @@ class CodeInspectorService {
             }
         }
         const sortedUiPages = uiPages.sort((a, b) => a.pagePath.localeCompare(b.pagePath));
+        await new Promise((resolve) => setImmediate(resolve));
         // Cross-link Constants with queries and UI pages
-        const { allConstants, constantClasses: linkedConstantClasses } = this.linkConstantsWithQueries(constantClasses, queries, sortedUiPages);
+        const { allConstants, constantClasses: linkedConstantClasses } = await this.linkConstantsWithQueries(constantClasses, queries, sortedUiPages);
         const stats = {
             totalFilesScanned,
             totalConnectionsFound: connections.length,

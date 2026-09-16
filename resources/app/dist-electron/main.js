@@ -1051,15 +1051,24 @@ electron_1.ipcMain.handle('ssis:cancel-job', async (_event, jobId) => {
     return ssisService.cancelJob(jobId);
 });
 // ==================== CODEBASE & APP DB INSPECTOR HANDLERS ====================
-electron_1.ipcMain.handle('code-inspector:scan', async (_event, folderPath) => {
-    return codeInspectorService_1.codeInspectorService.scanFolder(folderPath);
+electron_1.ipcMain.handle('code-inspector:scan', async (event, folderPath) => {
+    return await codeInspectorService_1.codeInspectorService.scanFolder(folderPath, (progress) => {
+        try {
+            if (!event.sender.isDestroyed()) {
+                event.sender.send('code-inspector:progress', progress);
+            }
+        }
+        catch {
+            // ignore progress send error
+        }
+    });
 });
 electron_1.ipcMain.handle('code-inspector:trace-custom-constants', async (_event, snippet, queries, uiPages) => {
     const parsed = codeInspectorService_1.codeInspectorService.parseConstantsFromText(snippet, 'custom_snippet.cs', 'custom_snippet.cs');
     if (uiPages && uiPages.length > 0) {
         codeInspectorService_1.codeInspectorService.resolveUiBindingConstants(uiPages, parsed);
     }
-    return codeInspectorService_1.codeInspectorService.linkConstantsWithQueries(parsed, queries, uiPages);
+    return await codeInspectorService_1.codeInspectorService.linkConstantsWithQueries(parsed, queries, uiPages);
 });
 // ==================== QUERY BEAUTY HANDLERS ====================
 electron_1.ipcMain.handle('query-beauty:read-column', async (_event, filePath, sheetName, columnName) => {
