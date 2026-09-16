@@ -1,4 +1,37 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -7,9 +40,11 @@ exports.menuLineageService = exports.MenuLineageService = void 0;
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const readline_1 = __importDefault(require("readline"));
+const XLSX = __importStar(require("xlsx"));
 class MenuLineageService {
     procIndex = new Map();
     businessLogicCache = new Map();
+    makroIndex = new Map();
     sendProgress(win, message, current, total) {
         if (!win || win.isDestroyed())
             return;
@@ -22,10 +57,13 @@ class MenuLineageService {
         const startTime = Date.now();
         this.procIndex.clear();
         this.businessLogicCache.clear();
+        this.makroIndex.clear();
         // 1. Index ALL_Proc if provided
         if (procPath && fs_1.default.existsSync(procPath)) {
             this.sendProgress(win, 'Meng-index repositori SQL di ALL_Proc...');
             await this.indexSqlRepository(procPath, win);
+            this.sendProgress(win, 'Mengecek fallback Makro_Komponen Excel...');
+            await this.indexMakroExcel(procPath, win);
         }
         // 2. Pre-index BusinessLogic classes in siska
         if (fs_1.default.existsSync(siskaPath)) {
@@ -188,6 +226,90 @@ class MenuLineageService {
                     resolve();
                 });
             });
+        }
+    }
+    async indexMakroExcel(procPath, win) {
+        try {
+            const findExcelFile = (dir) => {
+                try {
+                    const entries = fs_1.default.readdirSync(dir, { withFileTypes: true });
+                    for (const e of entries) {
+                        const full = path_1.default.join(dir, e.name);
+                        if (e.isDirectory()) {
+                            const nested = findExcelFile(full);
+                            if (nested)
+                                return nested;
+                        }
+                        else if (e.isFile()) {
+                            const lower = e.name.toLowerCase();
+                            if (lower.endsWith('.xlsx') && (lower.includes('makro') || lower.includes('komponen'))) {
+                                return full;
+                            }
+                        }
+                    }
+                }
+                catch { }
+                return null;
+            };
+            const excelPath = findExcelFile(procPath);
+            if (!excelPath)
+                return;
+            const fileName = path_1.default.basename(excelPath);
+            this.sendProgress(win, `Membaca fallback query dari Excel: ${fileName}...`);
+            const workbook = XLSX.readFile(excelPath, { cellDates: false, cellText: true });
+            const sheetName = workbook.SheetNames.find((s) => s.toLowerCase().includes('makro')) || workbook.SheetNames[0];
+            if (!sheetName)
+                return;
+            const sheet = workbook.Sheets[sheetName];
+            const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+            let loadedCount = 0;
+            for (let i = 0; i < rawRows.length; i++) {
+                const r = rawRows[i];
+                const idLaporan = String(r['ID_LAPORAN'] || r['id_laporan'] || '').trim();
+                const selectStatement = String(r['SELECT_STATEMENT'] || r['select_statement'] || '').trim();
+                if (!idLaporan || !selectStatement)
+                    continue;
+                const idKomponen = String(r['ID_KOMPONEN'] || r['id_komponen'] || '').trim();
+                const namaKomponen = String(r['NAMA_KOMPONEN1'] || r['NAMA_KOMPONEN2'] || r['NAMA_KOMPONEN3'] || '').trim();
+                const meta = {
+                    idLaporan,
+                    idKomponen,
+                    namaKomponen,
+                    selectStatement,
+                    excelRowNumber: i + 2,
+                    fileName,
+                    filePath: excelPath,
+                };
+                const registerKey = (k) => {
+                    if (!k)
+                        return;
+                    const clean = this.cleanProcKey(k);
+                    if (!this.makroIndex.has(clean)) {
+                        this.makroIndex.set(clean, []);
+                    }
+                    this.makroIndex.get(clean).push(meta);
+                    const dashVariant = clean.replace(/_/g, '-');
+                    if (dashVariant !== clean) {
+                        if (!this.makroIndex.has(dashVariant))
+                            this.makroIndex.set(dashVariant, []);
+                        this.makroIndex.get(dashVariant).push(meta);
+                    }
+                    const underVariant = clean.replace(/-/g, '_');
+                    if (underVariant !== clean) {
+                        if (!this.makroIndex.has(underVariant))
+                            this.makroIndex.set(underVariant, []);
+                        this.makroIndex.get(underVariant).push(meta);
+                    }
+                };
+                registerKey(idLaporan);
+                if (namaKomponen)
+                    registerKey(namaKomponen);
+                loadedCount++;
+            }
+            this.sendProgress(win, `Sukses meng-index ${loadedCount} query komponen dari ${fileName}`);
+        }
+        catch (e) {
+            console.warn('[MenuLineage] Failed to index Makro Excel:', e.message);
         }
     }
     async getSqlContent(meta) {
@@ -401,29 +523,83 @@ class MenuLineageService {
             }
         }
         const defaultGrid = gridControls.length > 0 ? gridControls[0] : 'dgvMain';
-        const defaultTab = tabs.length > 0 ? tabs[0] : 'Main';
+        const defaultTab = tabs.length > 0
+            ? tabs[0]
+            : subMenu && subMenu !== pageName
+                ? `Form ${subMenu}`
+                : 'Form Utama';
         if (detectedCalls.length === 0) {
-            results.push({
-                id: `LN_${pageName}_0`,
-                idLaporan,
-                idKomponen: defaultGrid,
-                namaMenu,
-                subMenu,
-                formTab: `${pageName} [${defaultTab}]`,
-                queryDidalamGrid: `-- Tidak ada pemanggilan query langsung pada ${pageName}.aspx`,
-                targetFormName: pageName,
-                tabName: defaultTab,
-                filterControls,
-                gridControls,
-                executedProcName: '',
-                isSqlFound: false,
-            });
+            // Fallback ke Makro_Komponen Excel jika idLaporan atau pageName cocok
+            const cleanPage = this.cleanProcKey(pageName);
+            const cleanLaporan = this.cleanProcKey(idLaporan);
+            const makroList = this.makroIndex.get(cleanLaporan) ||
+                this.makroIndex.get(cleanLaporan.replace(/-/g, '_')) ||
+                this.makroIndex.get(cleanPage) ||
+                this.makroIndex.get(cleanPage.replace(/_/g, '-'));
+            if (makroList && makroList.length > 0) {
+                for (let mIdx = 0; mIdx < makroList.length; mIdx++) {
+                    const m = makroList[mIdx];
+                    const tabLabel = tabs.length > 0
+                        ? tabs[0]
+                        : m.namaKomponen
+                            ? `Komponen: ${m.namaKomponen}`
+                            : subMenu && subMenu !== pageName
+                                ? `Form ${subMenu}`
+                                : 'Tabel Makro';
+                    results.push({
+                        id: `LN_${pageName}_MK_${m.idKomponen}_${mIdx}`,
+                        idLaporan: m.idLaporan || idLaporan,
+                        idKomponen: m.namaKomponen ? `${m.idKomponen} - ${m.namaKomponen}` : m.idKomponen || defaultGrid,
+                        namaMenu,
+                        subMenu,
+                        formTab: `${pageName} [Tab: ${tabLabel}]`,
+                        queryDidalamGrid: m.selectStatement,
+                        targetFormName: pageName,
+                        tabName: tabLabel,
+                        filterControls,
+                        gridControls,
+                        executedProcName: m.namaKomponen ? `[Makro] ${m.namaKomponen}` : `[Makro] ${m.idLaporan}`,
+                        sqlSourceFile: m.fileName,
+                        sqlLineNumber: m.excelRowNumber,
+                        isSqlFound: true,
+                    });
+                }
+            }
+            else {
+                const tabLabel = tabs.length > 0
+                    ? tabs.join(', ')
+                    : subMenu && subMenu !== pageName
+                        ? `Form ${subMenu}`
+                        : 'Form Utama';
+                results.push({
+                    id: `LN_${pageName}_0`,
+                    idLaporan,
+                    idKomponen: defaultGrid,
+                    namaMenu,
+                    subMenu,
+                    formTab: `${pageName} [Tab: ${tabLabel}]`,
+                    queryDidalamGrid: `-- Tidak ada pemanggilan query langsung pada ${pageName}.aspx`,
+                    targetFormName: pageName,
+                    tabName: tabLabel,
+                    filterControls,
+                    gridControls,
+                    executedProcName: '',
+                    isSqlFound: false,
+                });
+            }
         }
         else {
             let idx = 0;
             for (const call of detectedCalls) {
                 idx++;
-                const currentTab = tabs.length >= idx ? tabs[idx - 1] : defaultTab;
+                const currentTab = call.associatedTab ||
+                    (tabs.length >= idx
+                        ? tabs[idx - 1]
+                        : tabs.length > 0
+                            ? tabs[0]
+                            : subMenu && subMenu !== pageName
+                                ? `Form ${subMenu}`
+                                : 'Form Utama');
                 const currentGrid = gridControls.length >= idx ? gridControls[idx - 1] : defaultGrid;
                 let queryContent = '';
                 let sqlSourceFile;
@@ -440,7 +616,37 @@ class MenuLineageService {
                     queryContent = await this.getSqlContent(meta);
                 }
                 else {
-                    queryContent = `-- [SQL File Not Found in ALL_Proc]\n-- Object: ${call.procName}\n-- Tidak ditemukan berkas fisik pada repositori ALL_Proc.`;
+                    // Fallback: cari ke Makro_Komponen (1)_beautified.xlsx
+                    const makroList = this.makroIndex.get(cleanKey) ||
+                        this.makroIndex.get(cleanKey.replace(/-/g, '_')) ||
+                        this.makroIndex.get(cleanKey.replace(/_/g, '-')) ||
+                        (call.idLaporan
+                            ? this.makroIndex.get(this.cleanProcKey(call.idLaporan)) ||
+                                this.makroIndex.get(this.cleanProcKey(call.idLaporan).replace(/-/g, '_'))
+                            : undefined) ||
+                        (idLaporan
+                            ? this.makroIndex.get(this.cleanProcKey(idLaporan)) ||
+                                this.makroIndex.get(this.cleanProcKey(idLaporan).replace(/-/g, '_'))
+                            : undefined);
+                    if (makroList && makroList.length > 0) {
+                        isSqlFound = true;
+                        const first = makroList[0];
+                        sqlSourceFile = first.fileName;
+                        sqlLineNumber = first.excelRowNumber;
+                        if (makroList.length === 1) {
+                            queryContent = first.selectStatement;
+                        }
+                        else {
+                            queryContent =
+                                `-- [Sumber: ${first.fileName} | Total Komponen: ${makroList.length}]\n` +
+                                    makroList
+                                        .map((m) => `-- [Komponen ${m.idKomponen} - ${m.namaKomponen || '-'}]\n${m.selectStatement}`)
+                                        .join('\n\n');
+                        }
+                    }
+                    else {
+                        queryContent = `-- [SQL File Not Found in ALL_Proc & Makro Excel]\n-- Object: ${call.procName}\n-- Tidak ditemukan berkas fisik pada repositori ALL_Proc (ALL_Proc.sql, ALL_Package.sql, ALL_Func.sql) maupun Makro_Komponen Excel.`;
+                    }
                 }
                 results.push({
                     id: `LN_${pageName}_${call.procName.replace(/[^a-zA-Z0-9_]/g, '_')}_${idx}`,
@@ -448,7 +654,7 @@ class MenuLineageService {
                     idKomponen: currentGrid,
                     namaMenu,
                     subMenu,
-                    formTab: `${pageName} [${currentTab}]`,
+                    formTab: `${pageName} [Tab: ${currentTab}]`,
                     queryDidalamGrid: queryContent,
                     targetFormName: pageName,
                     tabName: currentTab,
@@ -467,18 +673,62 @@ class MenuLineageService {
         const tabs = [];
         if (!content)
             return tabs;
-        const radTabRegex = /<(?:telerik:RadTab|telerik:RadPageView)[^>]*(?:Text|HeaderText|ID)=["']([^"']+)["']/gi;
+        const addTab = (raw) => {
+            if (!raw)
+                return;
+            let clean = raw.replace(/^["'>\s]+/, '').replace(/["'<\s]+$/, '').trim();
+            if (clean &&
+                clean.length > 1 &&
+                !clean.startsWith('__') &&
+                !clean.includes('<%') &&
+                !clean.includes('ClientID') &&
+                !tabs.some((t) => t.toLowerCase() === clean.toLowerCase())) {
+                tabs.push(clean);
+            }
+        };
+        // 1. clicktab('NAME')
+        const clickRegex = /clicktab\(['"]([^'"]+)['"]\)/gi;
         let m;
-        while ((m = radTabRegex.exec(content)) !== null) {
-            const val = m[1].trim();
-            if (!val.startsWith('__'))
-                tabs.push(val);
+        while ((m = clickRegex.exec(content)) !== null) {
+            addTab(m[1]);
         }
-        const aspTabRegex = /<(?:asp:TabPanel|ajaxToolkit:TabPanel)[^>]*HeaderText=["']([^"']+)["']/gi;
-        while ((m = aspTabRegex.exec(content)) !== null) {
-            tabs.push(m[1].trim());
+        // 2. RadTab / RadPageView
+        const radRegex = /<(?:telerik:)?(?:RadTab|RadPageView)[^>]*(?:Text|HeaderText|ID)=['"]([^'"]+)['"]/gi;
+        while ((m = radRegex.exec(content)) !== null) {
+            addTab(m[1]);
         }
-        return Array.from(new Set(tabs));
+        // 3. TabPanel (AjaxToolkit / asp:TabPanel)
+        const tpRegex = /<(?:asp:|ajaxToolkit:)?TabPanel[^>]*(?:HeaderText|ID)=['"]([^'"]+)['"]/gi;
+        while ((m = tpRegex.exec(content)) !== null) {
+            addTab(m[1]);
+        }
+        // 4. DevExpress TabPage / ASPxPageControl
+        const dxRegex = /<(?:dx:)?TabPage[^>]*(?:Text|Name)=['"]([^'"]+)['"]/gi;
+        while ((m = dxRegex.exec(content)) !== null) {
+            addTab(m[1]);
+        }
+        // 5. Nav tabs links <a ...>Title</a> inside nav-tabs
+        const navTabsBlock = /<ul[^>]*class=['"][^'"]*nav-tabs[^'"]*['"][^>]*>([\s\S]*?)<\/ul>/gi;
+        while ((m = navTabsBlock.exec(content)) !== null) {
+            const aRegex = /<a[^>]*>([^<]+)<\/a>/gi;
+            let am;
+            while ((am = aRegex.exec(m[1])) !== null) {
+                addTab(am[1]);
+            }
+        }
+        // 6. Bootstrap tab-pane id (e.g. lipaneGrafik -> Grafik, lipaneTabel -> Tabel)
+        const paneRegex = /<div[^>]*class=['"][^'"]*tab-pane[^'"]*['"][^>]*id=['"]([^'"]+)['"]/gi;
+        while ((m = paneRegex.exec(content)) !== null) {
+            const cleanId = m[1].replace(/^lipane/i, '').replace(/^pane/i, '').replace(/^tab/i, '').trim();
+            addTab(cleanId);
+        }
+        // 7. asp:View
+        const viewRegex = /<asp:View[^>]*ID=['"]([^'"]+)['"]/gi;
+        while ((m = viewRegex.exec(content)) !== null) {
+            const cleanView = m[1].replace(/^vw/i, '').replace(/^view/i, '').trim();
+            addTab(cleanView);
+        }
+        return tabs;
     }
     extractControls(content, tagNames) {
         const controls = [];
