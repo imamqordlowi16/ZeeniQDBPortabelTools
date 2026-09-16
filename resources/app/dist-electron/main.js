@@ -1056,6 +1056,9 @@ electron_1.ipcMain.handle('code-inspector:scan', async (_event, folderPath) => {
 });
 electron_1.ipcMain.handle('code-inspector:trace-custom-constants', async (_event, snippet, queries, uiPages) => {
     const parsed = codeInspectorService_1.codeInspectorService.parseConstantsFromText(snippet, 'custom_snippet.cs', 'custom_snippet.cs');
+    if (uiPages && uiPages.length > 0) {
+        codeInspectorService_1.codeInspectorService.resolveUiBindingConstants(uiPages, parsed);
+    }
     return codeInspectorService_1.codeInspectorService.linkConstantsWithQueries(parsed, queries, uiPages);
 });
 // ==================== QUERY BEAUTY HANDLERS ====================

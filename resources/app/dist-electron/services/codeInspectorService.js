@@ -1095,11 +1095,60 @@ class CodeInspectorService {
                         }
                     }
                 }
+                // 4. Scan UI Pages and their C# binding calls for parameter usage
+                const matchedUiBindings = [];
+                for (const p of uiPages) {
+                    let pageHasBinding = false;
+                    for (const call of p.bindingCalls || []) {
+                        let foundParamIndex = -1;
+                        for (const param of call.parameters) {
+                            const pExpr = param.rawExpression.toUpperCase();
+                            if (pExpr === nameUpper ||
+                                (classConstUpper && pExpr === classConstUpper) ||
+                                pExpr.endsWith(`.${nameUpper}`) ||
+                                (hasSignificantVal && (param.resolvedValue?.toUpperCase() === valUpper || pExpr.includes(valUpper)))) {
+                                foundParamIndex = param.index;
+                                break;
+                            }
+                        }
+                        const snippetUpper = (call.fullCallSnippet || '').toUpperCase();
+                        const matchesCallSnippet = nameUpper.length >= 2 &&
+                            (snippetUpper.includes(nameUpper) ||
+                                (classConstUpper && snippetUpper.includes(classConstUpper)) ||
+                                (hasSignificantVal && snippetUpper.includes(valUpper)));
+                        if (foundParamIndex !== -1 || matchesCallSnippet) {
+                            pageHasBinding = true;
+                            matchedPageIds.add(p.id);
+                            // Find which grid this call might be bound to
+                            const boundGrid = (p.gridViews || []).find((g) => g.bindingCall?.id === call.id ||
+                                (call.targetVariable &&
+                                    g.dataSourceVariable &&
+                                    g.dataSourceVariable.toLowerCase() === call.targetVariable.toLowerCase()));
+                            matchedUiBindings.push({
+                                pageId: p.id,
+                                pageName: p.fileName,
+                                relativeFilePath: p.relativeFilePath,
+                                gridId: boundGrid?.id,
+                                targetVariable: call.targetVariable,
+                                methodName: call.methodName || 'DataMethod',
+                                methodClass: call.methodClass,
+                                callSnippet: call.fullCallSnippet,
+                                lineNumber: call.lineNumber,
+                                parameterIndex: foundParamIndex !== -1 ? foundParamIndex : 1,
+                                allParameters: call.parameters,
+                            });
+                        }
+                    }
+                    if (pageHasBinding) {
+                        matchedPageIds.add(p.id);
+                    }
+                }
                 c.matchedQueryIds = matchedQueryIds;
                 c.matchedQueriesCount = matchedQueryIds.length;
                 c.matchedTables = Array.from(matchedTables);
                 c.matchedUiPageIds = Array.from(matchedPageIds);
                 c.matchedUiPagesCount = matchedPageIds.size;
+                c.matchedUiBindings = matchedUiBindings;
                 allConstants.push(c);
             }
         }
@@ -1437,6 +1486,292 @@ class CodeInspectorService {
         return queries;
     }
     /**
+     * Safe character-by-character splitter for C# method arguments handling nested quotes and parens
+     */
+    splitArguments(argString) {
+        const args = [];
+        let current = '';
+        let inString = false;
+        let quoteChar = '';
+        let parenDepth = 0;
+        for (let i = 0; i < argString.length; i++) {
+            const ch = argString[i];
+            const prev = i > 0 ? argString[i - 1] : '';
+            if (inString) {
+                current += ch;
+                if (ch === quoteChar && prev !== '\\') {
+                    inString = false;
+                }
+            }
+            else {
+                if (ch === '"' || ch === "'") {
+                    inString = true;
+                    quoteChar = ch;
+                    current += ch;
+                }
+                else if (ch === '(' || ch === '[' || ch === '{') {
+                    parenDepth++;
+                    current += ch;
+                }
+                else if (ch === ')' || ch === ']' || ch === '}') {
+                    parenDepth = Math.max(0, parenDepth - 1);
+                    current += ch;
+                }
+                else if (ch === ',' && parenDepth === 0) {
+                    if (current.trim())
+                        args.push(current.trim());
+                    current = '';
+                }
+                else {
+                    current += ch;
+                }
+            }
+        }
+        if (current.trim()) {
+            args.push(current.trim());
+        }
+        return args;
+    }
+    /**
+     * Parse C# code-behind data loader calls, assignments, and parameters
+     */
+    parseUiBindingCalls(csContent, relPath) {
+        const calls = [];
+        if (!csContent || csContent.length > 3000000)
+            return calls; // guard 3MB
+        const varOrigins = new Map();
+        // 1. Detect variable origins e.g. "Bank.BankData dat = Bank.GetBankDataBySandiBank(...);"
+        const varDeclRegex = /(?:([a-zA-Z0-9_.]+)\s+)?\b([a-zA-Z0-9_]+)\s*=\s*([a-zA-Z0-9_.]+\s*\([^;]{1,300}\));/g;
+        let vm;
+        while ((vm = varDeclRegex.exec(csContent)) !== null) {
+            const vName = vm[2];
+            const vInit = vm[3];
+            if (vName && vInit && !['int', 'string', 'bool', 'double'].includes(vName)) {
+                varOrigins.set(vName, vInit.replace(/\s+/g, ' ').trim());
+            }
+        }
+        // 2. Match method calls assigning to DataTable, Grid DataSource, or business logic data loaders
+        const callRegex = /(?:(?:(?:var|DataTable|DataSet|auto|object)\s+)?([a-zA-Z0-9_]+(?:\.DataSource)?)\s*=\s*)?(?:([a-zA-Z0-9_]+)\.)?([a-zA-Z0-9_]+)\s*\(([^;]{0,1000})\)\s*;/g;
+        let match;
+        while ((match = callRegex.exec(csContent)) !== null) {
+            const fullSnippet = match[0].replace(/\s+/g, ' ').trim();
+            const targetVarRaw = match[1];
+            const targetVar = targetVarRaw ? targetVarRaw.replace(/\.DataSource$/i, '').trim() : undefined;
+            const methodClass = match[2] || undefined;
+            const methodName = match[3];
+            const rawArgs = match[4];
+            // Ignore trivial noise methods
+            if ([
+                'ToString',
+                'Equals',
+                'Substring',
+                'Trim',
+                'IndexOf',
+                'Format',
+                'DataBind',
+                'Rebind',
+                'Dispose',
+                'Close',
+                'Add',
+                'Clear',
+            ].includes(methodName)) {
+                continue;
+            }
+            // Filter out non-data methods unless targetVar or methodClass is present
+            if (!targetVar && !methodClass && !methodName.toLowerCase().includes('get') && !methodName.toLowerCase().includes('data')) {
+                continue;
+            }
+            const argList = this.splitArguments(rawArgs);
+            const parameters = [];
+            argList.forEach((arg, idx) => {
+                const index = idx + 1;
+                const cleanArg = arg.trim();
+                // 1. Check UI Control
+                if (/^(?:_?cbo|_?cb|_?txt|_?ddl|_?dtp|_?dp|_?rad|_?cal|_?chk|_?rb|_?lbl)/i.test(cleanArg) ||
+                    /\.(SelectedValue|SelectedDate|SelectedItem|Text|Checked|Value)\b/i.test(cleanArg)) {
+                    const ctrlMatch = cleanArg.match(/^([a-zA-Z0-9_]+)(?:\.(.+))?$/);
+                    const controlId = ctrlMatch ? ctrlMatch[1] : cleanArg;
+                    const controlProperty = ctrlMatch ? ctrlMatch[2] : undefined;
+                    let desc = `Nilai input filter dari kontrol UI ${controlId}`;
+                    if (/Date/i.test(cleanArg))
+                        desc = `Filter Posisi Tanggal dari kontrol UI ${controlId}`;
+                    else if (/Bank/i.test(controlId))
+                        desc = `Filter Sandi/Pilihan Bank dari dropdown UI ${controlId}`;
+                    else if (/Kelompok/i.test(controlId))
+                        desc = `Filter Kelompok Bank dari dropdown UI ${controlId}`;
+                    parameters.push({
+                        index,
+                        rawExpression: cleanArg,
+                        category: 'UI_CONTROL',
+                        controlId,
+                        controlProperty,
+                        description: desc,
+                    });
+                    return;
+                }
+                // 2. Check Object Property / Variable
+                if (/^[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+$/.test(cleanArg)) {
+                    const [objVar, prop] = cleanArg.split('.');
+                    const origin = varOrigins.get(objVar);
+                    parameters.push({
+                        index,
+                        rawExpression: cleanArg,
+                        category: 'VARIABLE',
+                        variableName: cleanArg,
+                        variableSource: origin,
+                        description: origin
+                            ? `Properti ${prop} dari objek ${objVar} (Inisialisasi: ${origin})`
+                            : `Properti data ${prop} dari objek ${objVar}`,
+                    });
+                    return;
+                }
+                // 3. Check Literal String or Number
+                if ((cleanArg.startsWith('"') && cleanArg.endsWith('"')) ||
+                    /^-?\d+(\.\d+)?$/.test(cleanArg)) {
+                    const resolved = cleanArg.replace(/^"|"$/g, '');
+                    parameters.push({
+                        index,
+                        rawExpression: cleanArg,
+                        category: 'LITERAL',
+                        resolvedValue: resolved,
+                        description: resolved.toUpperCase().includes('WHERE')
+                            ? `Klausa SQL filter kustom`
+                            : `Nilai parameter literal`,
+                    });
+                    return;
+                }
+                // 4. Default: Candidate Constant or Expression
+                parameters.push({
+                    index,
+                    rawExpression: cleanArg,
+                    category: 'EXPRESSION',
+                    description: `Ekspresi logika / konstanta C#`,
+                });
+            });
+            const charIndex = match.index;
+            const lineNum = csContent.slice(0, charIndex).split('\n').length;
+            calls.push({
+                id: `call_${calls.length + 1}`,
+                targetVariable: targetVar,
+                methodClass,
+                methodName,
+                fullCallSnippet: fullSnippet,
+                lineNumber: lineNum,
+                relativeCodeBehindPath: relPath,
+                parameters,
+                matchedConstants: [],
+            });
+        }
+        return calls;
+    }
+    /**
+     * Resolve UI GridView parameters and binding constants against scanned constant classes
+     */
+    resolveUiBindingConstants(uiPages, constantClasses) {
+        // 1. Pre-index constants
+        const constByName = new Map();
+        const constByClassAndName = new Map();
+        const constByValue = new Map();
+        for (const cls of constantClasses) {
+            for (const c of cls.constants) {
+                constByName.set(c.name.toUpperCase(), c);
+                if (c.className) {
+                    constByClassAndName.set(`${c.className}.${c.name}`.toUpperCase(), c);
+                }
+                if (c.value && c.value.trim().length >= 2) {
+                    constByValue.set(c.value.trim().toUpperCase(), c);
+                }
+            }
+        }
+        // 2. Resolve each page's binding calls
+        for (const page of uiPages) {
+            const pageConstants = [];
+            for (const call of page.bindingCalls || []) {
+                const matchedInCall = [];
+                for (const param of call.parameters) {
+                    const expr = param.rawExpression.trim();
+                    const exprUpper = expr.toUpperCase();
+                    let matched = constByClassAndName.get(exprUpper);
+                    if (!matched) {
+                        matched = constByName.get(exprUpper);
+                    }
+                    if (!matched) {
+                        const dotIdx = expr.lastIndexOf('.');
+                        if (dotIdx >= 0) {
+                            const part = expr.substring(dotIdx + 1).toUpperCase();
+                            matched = constByName.get(part);
+                        }
+                    }
+                    if (!matched && param.category === 'LITERAL' && param.resolvedValue) {
+                        matched = constByValue.get(param.resolvedValue.trim().toUpperCase());
+                    }
+                    if (matched) {
+                        param.category = 'CONSTANT';
+                        param.constantName = matched.name;
+                        param.constantClass = matched.className;
+                        param.constantValue = matched.value;
+                        param.constantDefinedIn = `${path_1.default.basename(matched.filePath)}:Baris ${matched.lineNumber}`;
+                        param.description = `Konstanta dari class ${matched.className || 'C#'} dengan nilai "${matched.value}"`;
+                        matchedInCall.push({
+                            name: matched.name,
+                            className: matched.className || '',
+                            value: matched.value,
+                            definedIn: param.constantDefinedIn,
+                            parameterIndex: param.index,
+                        });
+                        pageConstants.push({
+                            name: matched.name,
+                            className: matched.className || '',
+                            value: matched.value,
+                            definedIn: param.constantDefinedIn,
+                            targetVariable: call.targetVariable,
+                        });
+                    }
+                }
+                call.matchedConstants = matchedInCall;
+            }
+            // 3. Link GridViews to binding calls & used constants
+            for (const grid of page.gridViews) {
+                const gridConstants = [];
+                // Match grid with call
+                let matchedCall = (page.bindingCalls || []).find((c) => grid.dataSourceVariable &&
+                    c.targetVariable &&
+                    c.targetVariable.toLowerCase() === grid.dataSourceVariable.toLowerCase());
+                if (!matchedCall) {
+                    matchedCall = (page.bindingCalls || []).find((c) => {
+                        if (!c.targetVariable)
+                            return false;
+                        const tVar = c.targetVariable.toLowerCase();
+                        const gId = grid.id.toLowerCase();
+                        const gNum = gId.match(/\d+/)?.[0];
+                        const vNum = tVar.match(/\d+/)?.[0];
+                        if (gNum && vNum && gNum === vNum)
+                            return true;
+                        return gId.includes(tVar.replace(/^m_dt_|^dt_/, '')) || tVar.includes(gId);
+                    });
+                }
+                if (matchedCall) {
+                    grid.bindingCall = matchedCall;
+                    if (matchedCall.matchedConstants) {
+                        matchedCall.matchedConstants.forEach((mc) => {
+                            gridConstants.push({
+                                name: mc.name,
+                                className: mc.className,
+                                value: mc.value,
+                                definedIn: mc.definedIn,
+                                parameterIndex: mc.parameterIndex,
+                                callSnippet: matchedCall?.fullCallSnippet,
+                            });
+                        });
+                    }
+                }
+                grid.relatedBindingCalls = page.bindingCalls || [];
+                grid.usedConstants = gridConstants;
+            }
+            page.usedConstants = pageConstants;
+        }
+    }
+    /**
      * Scan UI Page (.aspx, .ascx) for GridViews, Columns, and code-behind data bindings
      */
     scanUiPageFile(filePath, rootPath) {
@@ -1476,6 +1811,8 @@ class CodeInspectorService {
                     formId = idFormMatch[1].trim();
                 }
             }
+            // Parse code-behind binding calls
+            const bindingCalls = csContent ? this.parseUiBindingCalls(csContent, relativeCodeBehindPath || '') : [];
             const gridViews = [];
             // Regex for Grids (RadGrid, GridView, DataGrid, ASPxGridView)
             const gridRegex = /<(telerik:RadGrid|asp:GridView|asp:DataGrid|dx:ASPxGridView)\s+([^>]+)>([\s\S]*?)<\/\1>/gi;
@@ -1506,6 +1843,23 @@ class CodeInspectorService {
                             }
                         }
                     }
+                }
+                // Match with a call from bindingCalls
+                let matchedBindingCall = bindingCalls.find((c) => dataSourceVar &&
+                    c.targetVariable &&
+                    c.targetVariable.toLowerCase() === dataSourceVar.toLowerCase());
+                if (!matchedBindingCall) {
+                    matchedBindingCall = bindingCalls.find((c) => {
+                        if (!c.targetVariable)
+                            return false;
+                        const tVar = c.targetVariable.toLowerCase();
+                        const gId = gridId.toLowerCase();
+                        const gNum = gId.match(/\d+/)?.[0];
+                        const vNum = tVar.match(/\d+/)?.[0];
+                        if (gNum && vNum && gNum === vNum)
+                            return true;
+                        return gId.includes(tVar.replace(/^m_dt_|^dt_/, '')) || tVar.includes(gId);
+                    });
                 }
                 // Parse Columns
                 const columns = [];
@@ -1556,6 +1910,8 @@ class CodeInspectorService {
                     dataLoaderCall: dataLoaderClassOrMethod,
                     referencedTables: [],
                     columns,
+                    bindingCall: matchedBindingCall,
+                    relatedBindingCalls: bindingCalls,
                 });
             }
             if (gridViews.length === 0)
@@ -1577,6 +1933,7 @@ class CodeInspectorService {
                 formId: formId || undefined,
                 idForm: formId || undefined,
                 gridViews,
+                bindingCalls,
             };
         }
         catch (e) {
@@ -1665,6 +2022,8 @@ class CodeInspectorService {
             }
         };
         walk(folderPath);
+        // Resolve UI GridView parameters and binding constants
+        this.resolveUiBindingConstants(uiPages, constantClasses);
         // Link queries with target models & parameter mappings
         const modelByTable = new Map();
         const modelByName = new Map();
