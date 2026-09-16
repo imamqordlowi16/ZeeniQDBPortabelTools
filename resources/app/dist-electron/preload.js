@@ -136,6 +136,7 @@ const electronAPI = {
     },
     // Codebase & Application DB Inspector
     codeInspectorScan: (folderPath) => electron_1.ipcRenderer.invoke('code-inspector:scan', folderPath),
+    codeInspectorTraceCustomConstants: (snippet, queries, uiPages) => electron_1.ipcRenderer.invoke('code-inspector:trace-custom-constants', snippet, queries, uiPages),
     // Query Beauty
     queryBeautyReadColumn: (filePath, sheetName, columnName) => electron_1.ipcRenderer.invoke('query-beauty:read-column', filePath, sheetName, columnName),
     queryBeautySaveExcel: (sourcePath, targetPath, sheetName, columnName, beautifiedMap) => electron_1.ipcRenderer.invoke('query-beauty:save-excel', sourcePath, targetPath, sheetName, columnName, beautifiedMap),

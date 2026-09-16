@@ -887,6 +887,221 @@ class CodeInspectorService {
         return models;
     }
     /**
+     * Scan single C# file for Constant classes and members
+     */
+    scanConstantFile(filePath, relFile) {
+        try {
+            const content = fs_1.default.readFileSync(filePath, 'utf8');
+            return this.parseConstantsFromText(content, filePath, relFile);
+        }
+        catch (e) {
+            console.warn(`Could not scan constant file ${filePath}:`, e.message);
+            return [];
+        }
+    }
+    /**
+     * Parse constant classes from raw C# source text
+     */
+    parseConstantsFromText(content, filePath = 'snippet.cs', relFile = 'snippet.cs') {
+        const classes = [];
+        if (!content || content.length > 3 * 1024 * 1024)
+            return classes;
+        const nsMatch = /namespace\s+([a-zA-Z0-9_\.]+)/.exec(content);
+        const namespace = nsMatch ? nsMatch[1] : undefined;
+        // Match class declarations, including "ClassOfArusKas {" without keyword "class"
+        const classRegex = /(?:(?:public|internal|protected|private)?\s*(?:static\s+)?(?:partial\s+)?class\s+([a-zA-Z0-9_]+)|^\s*([a-zA-Z0-9_]+)\s*\{)/gm;
+        let classMatch;
+        while ((classMatch = classRegex.exec(content)) !== null) {
+            const className = (classMatch[1] || classMatch[2])?.trim();
+            if (!className ||
+                ['if', 'for', 'foreach', 'while', 'switch', 'try', 'catch'].includes(className.toLowerCase())) {
+                continue;
+            }
+            const classStartIndex = classMatch.index + classMatch[0].length;
+            let braceCount = 1;
+            let classEndIndex = classStartIndex;
+            for (let i = classStartIndex; i < content.length; i++) {
+                if (content[i] === '{')
+                    braceCount++;
+                else if (content[i] === '}') {
+                    braceCount--;
+                    if (braceCount === 0) {
+                        classEndIndex = i;
+                        break;
+                    }
+                }
+            }
+            const classBody = content.substring(classStartIndex, classEndIndex);
+            const constItems = [];
+            // Match constants: public const string _name = "value"; or const int X = 1;
+            const constRegex = /(?:public|internal|protected|private)?\s*(?:const|static\s+readonly)\s+([a-zA-Z0-9_<>?\[\],\s]+?)\s+([a-zA-Z0-9_]+)\s*=\s*(?:@?["']([^"']*)["']|(-?\d+(?:\.\d+)?)|([a-zA-Z0-9_\.]+))\s*;/g;
+            let constMatch;
+            while ((constMatch = constRegex.exec(classBody)) !== null) {
+                const dataType = constMatch[1]?.trim();
+                const constName = constMatch[2]?.trim();
+                const constVal = constMatch[3] !== undefined
+                    ? constMatch[3]
+                    : constMatch[4] !== undefined
+                        ? constMatch[4]
+                        : constMatch[5] !== undefined
+                            ? constMatch[5]
+                            : '';
+                const matchPos = classStartIndex + constMatch.index;
+                const upToMatch = content.substring(0, matchPos);
+                const lineNum = upToMatch.split('\n').length;
+                const itemId = crypto_1.default
+                    .createHash('md5')
+                    .update(`${filePath}:${className}:${constName}`)
+                    .digest('hex')
+                    .substring(0, 12);
+                constItems.push({
+                    id: itemId,
+                    name: constName,
+                    value: constVal,
+                    dataType,
+                    className,
+                    namespace,
+                    filePath,
+                    relativeFilePath: relFile,
+                    lineNumber: lineNum,
+                    snippet: constMatch[0].trim(),
+                    matchedQueriesCount: 0,
+                    matchedQueryIds: [],
+                    matchedUiPagesCount: 0,
+                    matchedUiPageIds: [],
+                    matchedTables: [],
+                });
+            }
+            if (constItems.length > 0) {
+                const classId = crypto_1.default
+                    .createHash('md5')
+                    .update(`${filePath}:${className}`)
+                    .digest('hex')
+                    .substring(0, 12);
+                classes.push({
+                    id: classId,
+                    className,
+                    namespace,
+                    filePath,
+                    relativeFilePath: relFile,
+                    totalConstants: constItems.length,
+                    constants: constItems,
+                });
+            }
+        }
+        // Fallback: If no classes matched with curly braces but constant definitions exist
+        if (classes.length === 0) {
+            const topConstRegex = /(?:public|internal|protected|private)?\s*(?:const|static\s+readonly)\s+([a-zA-Z0-9_<>?\[\],\s]+?)\s+([a-zA-Z0-9_]+)\s*=\s*(?:@?["']([^"']*)["']|(-?\d+(?:\.\d+)?)|([a-zA-Z0-9_\.]+))\s*;/g;
+            let m;
+            const topItems = [];
+            while ((m = topConstRegex.exec(content)) !== null) {
+                const dataType = m[1]?.trim();
+                const constName = m[2]?.trim();
+                const constVal = m[3] !== undefined ? m[3] : m[4] !== undefined ? m[4] : m[5] !== undefined ? m[5] : '';
+                const lineNum = content.substring(0, m.index).split('\n').length;
+                topItems.push({
+                    id: crypto_1.default
+                        .createHash('md5')
+                        .update(`${filePath}:TopLevel:${constName}`)
+                        .digest('hex')
+                        .substring(0, 12),
+                    name: constName,
+                    value: constVal,
+                    dataType,
+                    className: 'GlobalConstants',
+                    namespace,
+                    filePath,
+                    relativeFilePath: relFile,
+                    lineNumber: lineNum,
+                    snippet: m[0].trim(),
+                    matchedQueriesCount: 0,
+                    matchedQueryIds: [],
+                    matchedUiPagesCount: 0,
+                    matchedUiPageIds: [],
+                    matchedTables: [],
+                });
+            }
+            if (topItems.length > 0) {
+                classes.push({
+                    id: 'cls-global',
+                    className: 'GlobalConstants',
+                    namespace,
+                    filePath,
+                    relativeFilePath: relFile,
+                    totalConstants: topItems.length,
+                    constants: topItems,
+                });
+            }
+        }
+        return classes;
+    }
+    /**
+     * Cross-references constant classes with scanned queries and UI pages
+     */
+    linkConstantsWithQueries(constantClasses, queries, uiPages) {
+        const allConstants = [];
+        for (const cClass of constantClasses) {
+            for (const c of cClass.constants) {
+                const nameRegex = new RegExp(`\\b${c.name}\\b`, 'i');
+                const classConstRegex = c.className
+                    ? new RegExp(`\\b${c.className}\\.${c.name}\\b`, 'i')
+                    : null;
+                const valUpper = (c.value || '').trim().toUpperCase();
+                const matchedQuerySet = new Set();
+                const matchedTableSet = new Set();
+                for (const q of queries) {
+                    let isMatch = false;
+                    // 1. Check code context snippet or SQL for constant name / Class.Constant
+                    if ((q.codeContextSnippet &&
+                        (nameRegex.test(q.codeContextSnippet) ||
+                            (classConstRegex && classConstRegex.test(q.codeContextSnippet)))) ||
+                        (q.sql &&
+                            (nameRegex.test(q.sql) ||
+                                (classConstRegex && classConstRegex.test(q.sql))))) {
+                        isMatch = true;
+                    }
+                    // 2. Check for constant value if significant (length >= 3 and not purely generic numbers)
+                    if (!isMatch && valUpper.length >= 3 && !/^\d+$/.test(valUpper)) {
+                        if (q.sql && q.sql.toUpperCase().includes(valUpper)) {
+                            isMatch = true;
+                        }
+                        else if (q.codeContextSnippet && q.codeContextSnippet.toUpperCase().includes(valUpper)) {
+                            isMatch = true;
+                        }
+                        else if (q.referencedTables && q.referencedTables.some((t) => t.toUpperCase() === valUpper)) {
+                            isMatch = true;
+                        }
+                    }
+                    if (isMatch) {
+                        matchedQuerySet.add(q.id);
+                        q.referencedTables.forEach((t) => matchedTableSet.add(t));
+                    }
+                }
+                c.matchedQueryIds = Array.from(matchedQuerySet);
+                c.matchedQueriesCount = matchedQuerySet.size;
+                c.matchedTables = Array.from(matchedTableSet);
+                // Find which UI pages use these matched queries
+                const matchedPageSet = new Set();
+                for (const p of uiPages) {
+                    for (const g of p.gridViews) {
+                        if (g.referencedQueryIds &&
+                            g.referencedQueryIds.some((qid) => matchedQuerySet.has(qid))) {
+                            matchedPageSet.add(p.id);
+                        }
+                    }
+                    if (p.codeBehindPath &&
+                        queries.some((q) => matchedQuerySet.has(q.id) && q.sourceFile === p.codeBehindPath)) {
+                        matchedPageSet.add(p.id);
+                    }
+                }
+                c.matchedUiPageIds = Array.from(matchedPageSet);
+                c.matchedUiPagesCount = matchedPageSet.size;
+                allConstants.push(c);
+            }
+        }
+        return { constantClasses, allConstants };
+    }
+    /**
      * Smart resolver for dynamic SQL string.Format arguments, e.g.
      * string.Format(@"SELECT * FROM TABLE({0}({1}, {2}, {3}))", arg0, ...)
      * or "SELECT * FROM TABLE({0}(...))"
@@ -1378,6 +1593,7 @@ class CodeInspectorService {
         const queries = [];
         const models = [];
         const uiPages = [];
+        const constantClasses = [];
         let totalFilesScanned = 0;
         const walk = (currentDir) => {
             const items = fs_1.default.readdirSync(currentDir, { withFileTypes: true });
@@ -1418,11 +1634,15 @@ class CodeInspectorService {
                         const conns = this.parseJsonConfigFile(full, rel);
                         connections.push(...conns);
                     }
-                    // Parse C# Models & Entities
+                    // Parse C# Models & Entities & Constants
                     if (ext === '.cs') {
                         const fileModels = this.scanModelFile(full, rel);
                         if (fileModels.length > 0) {
                             models.push(...fileModels);
+                        }
+                        const fileConstants = this.scanConstantFile(full, rel);
+                        if (fileConstants.length > 0) {
+                            constantClasses.push(...fileConstants);
                         }
                     }
                     // Parse UI Pages & GridViews (ASPX, ASCX)
@@ -1656,6 +1876,8 @@ class CodeInspectorService {
             }
         }
         const sortedUiPages = uiPages.sort((a, b) => a.pagePath.localeCompare(b.pagePath));
+        // Cross-link Constants with queries and UI pages
+        const { allConstants, constantClasses: linkedConstantClasses } = this.linkConstantsWithQueries(constantClasses, queries, sortedUiPages);
         const stats = {
             totalFilesScanned,
             totalConnectionsFound: connections.length,
@@ -1665,6 +1887,8 @@ class CodeInspectorService {
             totalModelsFound: sortedModels.length,
             totalUiPagesFound: sortedUiPages.length,
             totalGridViewsFound: sortedUiPages.reduce((sum, p) => sum + p.gridViews.length, 0),
+            totalConstantsFound: allConstants.length,
+            totalConstantClassesFound: linkedConstantClasses.length,
             durationMs: Date.now() - startTime,
         };
         return {
@@ -1678,6 +1902,8 @@ class CodeInspectorService {
             procedures,
             models: sortedModels,
             uiPages: sortedUiPages,
+            constants: allConstants,
+            constantClasses: linkedConstantClasses,
         };
     }
 }

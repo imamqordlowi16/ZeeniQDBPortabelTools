@@ -1054,6 +1054,10 @@ electron_1.ipcMain.handle('ssis:cancel-job', async (_event, jobId) => {
 electron_1.ipcMain.handle('code-inspector:scan', async (_event, folderPath) => {
     return codeInspectorService_1.codeInspectorService.scanFolder(folderPath);
 });
+electron_1.ipcMain.handle('code-inspector:trace-custom-constants', async (_event, snippet, queries, uiPages) => {
+    const parsed = codeInspectorService_1.codeInspectorService.parseConstantsFromText(snippet, 'custom_snippet.cs', 'custom_snippet.cs');
+    return codeInspectorService_1.codeInspectorService.linkConstantsWithQueries(parsed, queries, uiPages);
+});
 // ==================== QUERY BEAUTY HANDLERS ====================
 electron_1.ipcMain.handle('query-beauty:read-column', async (_event, filePath, sheetName, columnName) => {
     return queryBeautyService_1.queryBeautyService.readColumnQueries(filePath, sheetName, columnName);
