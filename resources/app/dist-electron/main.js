@@ -23,6 +23,7 @@ const codeInspectorService_1 = require("./services/codeInspectorService");
 const queryBeautyService_1 = require("./services/queryBeautyService");
 const sshTunnelService_1 = require("./services/sshTunnelService");
 const sqlTableGeneratorService_1 = require("./services/sqlTableGeneratorService");
+const menuLineageService_1 = require("./services/menuLineageService");
 function writeLog(msg) {
     const line = `[${new Date().toISOString()}] ${msg}\n`;
     try {
@@ -1092,4 +1093,9 @@ electron_1.ipcMain.handle('query-beauty:save-sql', async (_event, targetPath, qu
 });
 electron_1.ipcMain.handle('query-beauty:beautify-text', async (_event, rawSql) => {
     return (0, queryBeautyService_1.beautifyOracleQuery)(rawSql);
+});
+// ==================== MENU QUERY LINEAGE HANDLER ====================
+electron_1.ipcMain.handle('menu-lineage:scan', async (event, siskaPath, procPath) => {
+    const win = electron_1.BrowserWindow.fromWebContents(event.sender);
+    return await menuLineageService_1.menuLineageService.scanMenuLineage(siskaPath, procPath, win);
 });

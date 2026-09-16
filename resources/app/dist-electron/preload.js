@@ -158,5 +158,12 @@ const electronAPI = {
     canApplyUpdates: () => electron_1.ipcRenderer.invoke('license:can-update'),
     getTrialStatus: () => electron_1.ipcRenderer.invoke('license:get-trial-status'),
     openExternal: (url) => electron_1.ipcRenderer.invoke('shell:open-external', url),
+    // Menu Query Lineage
+    menuLineageScan: (siskaPath, procPath) => electron_1.ipcRenderer.invoke('menu-lineage:scan', siskaPath, procPath),
+    onMenuLineageProgress: (callback) => {
+        const listener = (_, progress) => callback(progress);
+        electron_1.ipcRenderer.on('menu-lineage:progress', listener);
+        return () => electron_1.ipcRenderer.removeListener('menu-lineage:progress', listener);
+    },
 };
 electron_1.contextBridge.exposeInMainWorld('electronAPI', electronAPI);
