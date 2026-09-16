@@ -29,29 +29,29 @@ class SqlTableGeneratorService {
         });
         const functions = [];
         let currentFunction = null;
+        let currentFunctionLines = [];
         let currentSelectLines = [];
         let capturingSelect = false;
         let currentSelectStartLine = 0;
         let currentSelectLabel = '';
         let lineIdx = 0;
         let selectCounter = 0;
-        const fnHeaderRegex = /CREATE\s+OR\s+REPLACE\s+(FUNCTION|PROCEDURE|PACKAGE\s+BODY)\s+(?:["']?[A-Za-z0-9_$]+["']?\.)?["']?([A-Za-z0-9_$]+)["']?/i;
+        const fnHeaderRegex = /CREATE\s+(?:OR\s+REPLACE\s+)?(?:EDITIONABLE\s+|NONEDITIONABLE\s+)?(FUNCTION|PROCEDURE|PACKAGE\s+BODY|PACKAGE)\s+(?:["']?[A-Za-z0-9_$]+["']?\.)?["']?([A-Za-z0-9_$]+)["']?/i;
+        const subprogramRegex = /^\s*(PROCEDURE|FUNCTION)\s+["']?([A-Za-z0-9_$]+)["']?\s*(?:\(|$)/i;
         const finalizeSelect = () => {
             if (currentFunction && currentSelectLines.length > 0) {
                 const fullSelect = currentSelectLines.join('\n').trim();
                 if (fullSelect.length > 10) {
                     const cols = this.extractColumnsFromSelect(fullSelect);
-                    if (cols.length > 0) {
-                        selectCounter++;
-                        currentFunction.selectQueries.push({
-                            queryIndex: selectCounter,
-                            label: currentSelectLabel || `Query #${selectCounter}`,
-                            queryText: fullSelect,
-                            startLine: currentSelectStartLine,
-                            columns: cols,
-                            fromClauseSummary: this.extractFromSummary(fullSelect),
-                        });
-                    }
+                    selectCounter++;
+                    currentFunction.selectQueries.push({
+                        queryIndex: selectCounter,
+                        label: currentSelectLabel || `Query #${selectCounter}`,
+                        queryText: fullSelect,
+                        startLine: currentSelectStartLine,
+                        columns: cols,
+                        fromClauseSummary: this.extractFromSummary(fullSelect),
+                    });
                 }
             }
             currentSelectLines = [];
@@ -61,22 +61,43 @@ class SqlTableGeneratorService {
         for await (const line of rl) {
             lineIdx++;
             const trimmed = line.trim();
-            // Check for new FUNCTION / PROCEDURE declaration
+            // Check for new FUNCTION / PROCEDURE / PACKAGE declaration
+            let matchType = null;
+            let matchName = null;
             const fnMatch = line.match(fnHeaderRegex);
             if (fnMatch) {
+                matchType = fnMatch[1].toUpperCase().replace(/\s+/g, '_');
+                matchName = fnMatch[2];
+            }
+            else {
+                const subMatch = line.match(subprogramRegex);
+                if (subMatch &&
+                    (trimmed.startsWith('PROCEDURE') ||
+                        trimmed.startsWith('FUNCTION') ||
+                        trimmed.startsWith('procedure') ||
+                        trimmed.startsWith('function'))) {
+                    matchType = subMatch[1].toUpperCase();
+                    matchName = subMatch[2];
+                }
+            }
+            if (matchType && matchName) {
                 // Finalize previous select query if open
                 finalizeSelect();
                 // Finalize previous function
                 if (currentFunction) {
                     currentFunction.endLine = lineIdx - 1;
+                    currentFunction.rawBody = currentFunctionLines.join('\n').trim();
                     functions.push(currentFunction);
                 }
-                const rawType = fnMatch[1].toUpperCase().replace(/\s+/g, '_');
-                const type = rawType === 'PROCEDURE' ? 'PROCEDURE' : rawType === 'PACKAGE_BODY' ? 'PACKAGE_BODY' : 'FUNCTION';
-                const name = fnMatch[2];
+                currentFunctionLines = [];
+                const type = matchType === 'PROCEDURE'
+                    ? 'PROCEDURE'
+                    : matchType === 'PACKAGE_BODY' || matchType === 'PACKAGE'
+                        ? 'PACKAGE_BODY'
+                        : 'FUNCTION';
                 currentFunction = {
-                    id: `func_${lineIdx}_${name}`,
-                    name,
+                    id: `func_${lineIdx}_${matchName}`,
+                    name: matchName,
                     type,
                     startLine: lineIdx,
                     endLine: lineIdx,
@@ -85,10 +106,12 @@ class SqlTableGeneratorService {
                     sourceFile: fileName,
                 };
                 selectCounter = 0;
+                currentFunctionLines.push(line);
                 continue;
             }
-            // If we are inside a function/procedure, watch for SELECT queries
+            // If we are inside a function/procedure, watch for SELECT queries & keep lines
             if (currentFunction) {
+                currentFunctionLines.push(line);
                 // Detect Cursor start: CURSOR name IS SELECT
                 const cursorMatch = line.match(/CURSOR\s+([A-Za-z0-9_$]+)(?:\s*\([^)]*\))?\s+IS\s*(SELECT.*)?/i);
                 if (cursorMatch) {
@@ -127,7 +150,10 @@ class SqlTableGeneratorService {
                     // Common terminations in PL/SQL:
                     // 1) Semicolon ';' at end of query
                     // 2) ') LOOP' or ') TB' or 'LOOP' or 'END;'
-                    if (trimmed.includes(';') || trimmed.endsWith(')') || trimmed.toUpperCase().includes(') LOOP') || trimmed.toUpperCase().startsWith('LOOP')) {
+                    if (trimmed.includes(';') ||
+                        trimmed.endsWith(')') ||
+                        trimmed.toUpperCase().includes(') LOOP') ||
+                        trimmed.toUpperCase().startsWith('LOOP')) {
                         currentSelectLines.push(line);
                         finalizeSelect();
                     }
@@ -141,6 +167,7 @@ class SqlTableGeneratorService {
         finalizeSelect();
         if (currentFunction) {
             currentFunction.endLine = lineIdx;
+            currentFunction.rawBody = currentFunctionLines.join('\n').trim();
             functions.push(currentFunction);
         }
         const totalFunctions = functions.filter((f) => f.type === 'FUNCTION').length;
