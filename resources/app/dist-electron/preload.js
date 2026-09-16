@@ -147,6 +147,9 @@ const electronAPI = {
     queryBeautySaveExcel: (sourcePath, targetPath, sheetName, columnName, beautifiedMap) => electron_1.ipcRenderer.invoke('query-beauty:save-excel', sourcePath, targetPath, sheetName, columnName, beautifiedMap),
     queryBeautySaveSql: (targetPath, queryRows, title) => electron_1.ipcRenderer.invoke('query-beauty:save-sql', targetPath, queryRows, title),
     queryBeautyBeautifyText: (rawSql) => electron_1.ipcRenderer.invoke('query-beauty:beautify-text', rawSql),
+    // SQL Table Generator & Schema Studio
+    sqlTableGeneratorParseFile: (filePath) => electron_1.ipcRenderer.invoke('sql-table-generator:parse-file', filePath),
+    sqlTableGeneratorExecuteCreateTable: (config, options) => electron_1.ipcRenderer.invoke('sql-table-generator:execute-create-table', config, options),
     // Licensing & Commercial Protection
     getMachineId: () => electron_1.ipcRenderer.invoke('license:get-machine-id'),
     getActiveLicense: () => electron_1.ipcRenderer.invoke('license:get-active'),

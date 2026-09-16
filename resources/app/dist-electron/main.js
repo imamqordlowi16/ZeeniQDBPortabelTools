@@ -22,6 +22,7 @@ const ssisService_1 = require("./services/ssisService");
 const codeInspectorService_1 = require("./services/codeInspectorService");
 const queryBeautyService_1 = require("./services/queryBeautyService");
 const sshTunnelService_1 = require("./services/sshTunnelService");
+const sqlTableGeneratorService_1 = require("./services/sqlTableGeneratorService");
 function writeLog(msg) {
     const line = `[${new Date().toISOString()}] ${msg}\n`;
     try {
@@ -53,6 +54,7 @@ let networkService;
 let txtBundleService;
 let licenseManager;
 let ssisService;
+let sqlTableGeneratorService;
 function initServices() {
     try {
         licenseManager = new licenseManager_1.LicenseManager();
@@ -65,6 +67,7 @@ function initServices() {
         networkService = new networkService_1.NetworkService();
         txtBundleService = new txtBundleService_1.TxtBundleService(oracleService);
         ssisService = new ssisService_1.SsisService();
+        sqlTableGeneratorService = new sqlTableGeneratorService_1.SqlTableGeneratorService(oracleService);
         writeLog('Services initialized successfully');
     }
     catch (err) {
@@ -648,6 +651,13 @@ electron_1.ipcMain.handle('txt-bundle:import', async (_, config, options) => {
     return await txtBundleService.executeBundleImport(config, options, (progress) => {
         mainWindow?.webContents.send('txt-bundle:progress', progress);
     });
+});
+// ==================== SQL TABLE GENERATOR IPC HANDLERS ====================
+electron_1.ipcMain.handle('sql-table-generator:parse-file', async (_, filePath) => {
+    return await sqlTableGeneratorService.parseSqlFile(filePath);
+});
+electron_1.ipcMain.handle('sql-table-generator:execute-create-table', async (_, config, options) => {
+    return await sqlTableGeneratorService.executeCreateTable(config, options);
 });
 electron_1.ipcMain.handle('shell:open-path', async (_, targetPath) => {
     return await electron_1.shell.openPath(targetPath);
