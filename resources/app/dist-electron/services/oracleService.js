@@ -2590,14 +2590,22 @@ class OracleService {
             const insertSql = `INSERT INTO ${targetTable} (${colList}) VALUES (${bindList})`;
             const batchSize = options.batchSize || 100;
             let inserted = 0;
+            // Prepare bindDefs so node-oracledb allocates sufficient buffers for varying string lengths up to 32KB
+            const bindDefs = {};
+            options.columns.forEach((_, colIdx) => {
+                bindDefs[colIdx] = {
+                    type: oracledb_1.default.STRING,
+                    maxSize: 32767,
+                };
+            });
             for (let i = 0; i < options.rows.length; i += batchSize) {
                 const chunk = options.rows.slice(i, i + batchSize);
                 const formattedChunk = chunk.map((r) => r.map((val) => {
                     if (val === undefined || val === null || val === '')
                         return null;
-                    return val;
+                    return typeof val === 'string' ? val.substring(0, 32000) : val;
                 }));
-                await conn.executeMany(insertSql, formattedChunk, { autoCommit: false });
+                await conn.executeMany(insertSql, formattedChunk, { autoCommit: false, bindDefs });
                 inserted += chunk.length;
             }
             await conn.commit();
