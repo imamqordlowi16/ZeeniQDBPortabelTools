@@ -483,10 +483,11 @@ class MenuLineageService {
         if (titleMatch && titleMatch[1].trim()) {
             subMenu = titleMatch[1].trim();
         }
-        // Extract Tabs, Grids, and Filters
+        // Extract Tabs, Grids, Charts, and Filters
         const tabs = this.extractTabs(uiContent);
         const filterControls = this.extractControls(uiContent, ['TextBox', 'DropDownList', 'RadComboBox', 'RadDatePicker', 'RadTextBox', 'CheckBox']);
         const gridControls = this.extractControls(uiContent, ['RadGrid', 'GridView', 'DataGrid', 'ASPxGridView']);
+        const chartControls = this.extractChartControls(uiContent);
         // Code-behind
         const codeBehindPath = uiPath + '.cs';
         let codeBehindContent = '';
@@ -522,7 +523,9 @@ class MenuLineageService {
                 }
             }
         }
-        const defaultGrid = gridControls.length > 0 ? gridControls[0] : 'dgvMain';
+        const hasGrids = gridControls.length > 0;
+        const hasCharts = chartControls.length > 0;
+        const defaultGrid = hasGrids ? gridControls[0] : hasCharts ? chartControls[0] : 'dgvMain';
         const defaultTab = tabs.length > 0
             ? tabs[0]
             : subMenu && subMenu !== pageName
@@ -558,6 +561,7 @@ class MenuLineageService {
                         tabName: tabLabel,
                         filterControls,
                         gridControls,
+                        chartControls,
                         executedProcName: m.namaKomponen ? `[Makro] ${m.namaKomponen}` : `[Makro] ${m.idLaporan}`,
                         sqlSourceFile: m.fileName,
                         sqlLineNumber: m.excelRowNumber,
@@ -583,6 +587,7 @@ class MenuLineageService {
                     tabName: tabLabel,
                     filterControls,
                     gridControls,
+                    chartControls,
                     executedProcName: '',
                     isSqlFound: false,
                 });
@@ -600,7 +605,21 @@ class MenuLineageService {
                             : subMenu && subMenu !== pageName
                                 ? `Form ${subMenu}`
                                 : 'Form Utama');
-                const currentGrid = gridControls.length >= idx ? gridControls[idx - 1] : defaultGrid;
+                const isChartTab = /grafik|chart|diagram/i.test(currentTab);
+                let currentComponent = defaultGrid;
+                if (isChartTab && hasCharts) {
+                    const chartIdx = Math.min(idx - 1, chartControls.length - 1);
+                    currentComponent = chartControls[Math.max(0, chartIdx)];
+                }
+                else if (gridControls.length >= idx) {
+                    currentComponent = gridControls[idx - 1];
+                }
+                else if (hasCharts && idx - gridControls.length > 0 && idx - gridControls.length <= chartControls.length) {
+                    currentComponent = chartControls[idx - gridControls.length - 1];
+                }
+                else {
+                    currentComponent = defaultGrid;
+                }
                 let queryContent = '';
                 let sqlSourceFile;
                 let sqlLineNumber;
@@ -651,7 +670,7 @@ class MenuLineageService {
                 results.push({
                     id: `LN_${pageName}_${call.procName.replace(/[^a-zA-Z0-9_]/g, '_')}_${idx}`,
                     idLaporan: call.idLaporan || idLaporan,
-                    idKomponen: currentGrid,
+                    idKomponen: currentComponent,
                     namaMenu,
                     subMenu,
                     formTab: `${pageName} [Tab: ${currentTab}]`,
@@ -660,6 +679,7 @@ class MenuLineageService {
                     tabName: currentTab,
                     filterControls,
                     gridControls,
+                    chartControls,
                     executedProcName: call.procName,
                     sqlSourceFile,
                     sqlLineNumber,
@@ -740,6 +760,45 @@ class MenuLineageService {
         while ((m = regex.exec(content)) !== null) {
             const id = m[1].trim();
             if (!id.startsWith('__') && !id.startsWith('btn') && !id.includes('ScriptManager')) {
+                controls.push(id);
+            }
+        }
+        return Array.from(new Set(controls));
+    }
+    extractChartControls(content) {
+        const controls = [];
+        if (!content)
+            return controls;
+        // 1. Chart tags from ASP.NET, Telerik, DevExpress, AjaxToolkit
+        const chartTagNames = [
+            'Chart',
+            'RadHtmlChart',
+            'RadChart',
+            'WebChartControl',
+            'RadColumnChart',
+            'RadPieChart',
+            'RadBarChart',
+            'RadLineChart',
+            'RadAreaChart',
+            'RadDonutChart',
+            'BarChart',
+            'PieChart',
+            'LineChart',
+        ];
+        const tagsPattern = chartTagNames.join('|');
+        const regex = new RegExp(`<(?:asp:|telerik:|dx:|ajaxToolkit:)?(?:${tagsPattern})[^>]*ID=["']([^"']+)["']`, 'gi');
+        let m;
+        while ((m = regex.exec(content)) !== null) {
+            const id = m[1].trim();
+            if (!id.startsWith('__')) {
+                controls.push(id);
+            }
+        }
+        // 2. Highcharts, ChartJS, ApexCharts container divs or canvas (e.g. id="chartContainer", id="chtSales", id="divGrafik")
+        const divChartRegex = /<(?:div|canvas|asp:Panel)[^>]*id=["']([^"']*(?:chart|grafik|diagram)[^"']*)["']/gi;
+        while ((m = divChartRegex.exec(content)) !== null) {
+            const id = m[1].trim();
+            if (!id.startsWith('__') && !controls.includes(id)) {
                 controls.push(id);
             }
         }
